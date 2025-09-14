@@ -227,6 +227,27 @@ class RealSearchOrchestrator:
                     max_screenshots=10
                 )
 
+            # INTEGRAÇÃO COM VIRAL CONTENT ANALYZER
+            logger.info("🔥 FASE VIRAL: Analisando conteúdo viral...")
+            try:
+                from services.viral_content_analyzer import viral_content_analyzer
+                
+                viral_analysis = await viral_content_analyzer.analyze_and_capture_viral_content(
+                    search_results=search_results,
+                    session_id=session_id
+                )
+                
+                # Incorpora resultados virais no resultado final
+                massive_data["viral_analysis"] = viral_analysis
+                massive_data["viral_content_found"] = len(viral_analysis.get("viral_content_identified", []))
+                massive_data["viral_images_downloaded"] = len(viral_analysis.get("screenshots_captured", []))
+                
+                logger.info(f"✅ Análise viral: {massive_data['viral_content_found']} conteúdos encontrados")
+                
+            except Exception as e:
+                logger.error(f"❌ Erro na análise viral: {e}")
+                massive_data["viral_analysis"] = {"error": str(e)}
+
             # FASE 7: Seleção de URLs Relevantes (para screenshots gerais)
             logger.info("🎯 FASE 7: Selecionando URLs mais relevantes (geral)...")
             selected_urls = visual_content_capture.select_top_urls(search_results, max_urls=8)
@@ -1486,6 +1507,172 @@ class RealSearchOrchestrator:
             'is_fallback': True,
             'fallback_reason': 'API authentication failed or unavailable'
         }
+
+    # Salva resultado final
+    def _save_search_results(self, consolidated_results, session_id):
+        """Salva os resultados da busca"""
+        try:
+            salvar_etapa("search_results", consolidated_results, categoria="busca")
+            logger.info(f"✅ Resultados salvos para sessão {session_id}")
+        except Exception as e:
+            logger.error(f"❌ Erro ao salvar resultados: {e}")
+
+    # Gera arquivo RES_BUSCA final
+    async def _generate_res_busca_file_with_viral(self, results: Dict[str, Any], query: str, session_id: str) -> str:
+        """Gera arquivo RES_BUSCA com integração viral"""
+        
+        try:
+            # Cria diretório se não existir
+            output_dir = f"analyses_data/{session_id}"
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Nome do arquivo
+            safe_query = "".join(c for c in query if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            file_path = os.path.join(output_dir, f"RES_BUSCA_{safe_query[:50]}.txt")
+            
+            # Conteúdo do arquivo
+            content_lines = [
+                f"RESULTADO DE BUSCA MASSIVA - {query.upper()}",
+                "="*80,
+                f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+                f"Sessão: {session_id}",
+                f"Total de fontes: {results.get('statistics', {}).get('total_sources', 0)}",
+                "="*80,
+                ""
+            ]
+            
+            # Adiciona dados de busca web
+            content_lines.extend(self._format_web_results(results))
+            
+            # NOVA SEÇÃO: Adiciona dados virais
+            viral_analysis = results.get("viral_analysis", {})
+            if viral_analysis and not viral_analysis.get("error"):
+                content_lines.append("\n" + "="*80)
+                content_lines.append("CONTEÚDO VIRAL IDENTIFICADO")
+                content_lines.append("="*80)
+                
+                viral_content = viral_analysis.get("viral_content_identified", [])
+                content_lines.append(f"Total de conteúdos virais: {len(viral_content)}")
+                content_lines.append(f"Imagens capturadas: {len(viral_analysis.get('screenshots_captured', []))}")
+                
+                # Adiciona insights virais
+                viral_insights = viral_analysis.get("viral_insights", [])
+                if viral_insights:
+                    content_lines.append("\nINSIGHTS VIRAIS:")
+                    for insight in viral_insights:
+                        content_lines.append(f"• {insight}")
+                
+                # Adiciona top conteúdos virais
+                if viral_content:
+                    content_lines.append("\nTOP CONTEÚDOS VIRAIS:")
+                    for i, content in enumerate(viral_content[:5], 1):
+                        if isinstance(content, dict):
+                            content_lines.append(f"{i}. [{content.get('platform', 'N/A').upper()}] {content.get('title', 'Sem título')}")
+                            content_lines.append(f"   Engagement: {content.get('engagement_score', 0):.1f}")
+                            content_lines.append(f"   URL: {content.get('post_url', 'N/A')}")
+                            
+                            if content.get('viral_indicators'):
+                                content_lines.append(f"   Indicadores: {', '.join(content['viral_indicators'][:3])}")
+                            content_lines.append("")
+                
+                content_lines.append("="*80)
+            
+            # Adiciona dados do WebSailor se disponível
+            websailor_data = results.get("websailor_results", {})
+            if websailor_data.get("success"):
+                content_lines.append("\n" + "="*80)
+                content_lines.append("DADOS ALIBABA WEBSAILOR")
+                content_lines.append("="*80)
+                content_lines.extend(self._format_websailor_results(websailor_data))
+            
+            # Salva arquivo
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(content_lines))
+            
+            # Atualiza status no arquivo
+            await self._update_file_status(file_path, len(content_lines))
+            
+            logger.info(f"📄 RES_BUSCA gerado: {file_path}")
+            return str(file_path)
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao gerar RES_BUSCA: {e}")
+            return ""
+
+    async def _update_file_status(self, file_path: str, content_lines_count: int):
+        """Atualiza status do arquivo RES_BUSCA"""
+        try:
+            # Lê o arquivo atual
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Calcula estatísticas
+            file_size_kb = len(content.encode('utf-8')) / 1024
+            
+            # Adiciona metadados ao final
+            metadata = f"""
+
+{"="*80}
+METADADOS DO ARQUIVO
+{"="*80}
+Status: CONCLUÍDO
+Tamanho: {file_size_kb:.1f} KB
+Linhas: {content_lines_count:,}
+Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
+Viral Integration: ATIVO
+{"="*80}
+"""
+            
+            # Reescreve arquivo com metadados
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(content + metadata)
+            
+            logger.info(f"📊 Arquivo atualizado: {file_size_kb:.1f} KB")
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao atualizar status: {e}")
+
+    def _format_web_results(self, results: Dict[str, Any]) -> List[str]:
+        """Formata resultados web para o arquivo RES_BUSCA"""
+        lines = []
+        web_results = results.get('web_results', [])
+        
+        if web_results:
+            lines.append("RESULTADOS WEB:")
+            lines.append("-" * 40)
+            
+            for i, result in enumerate(web_results[:10], 1):
+                lines.append(f"{i}. {result.get('title', 'Sem título')}")
+                lines.append(f"   URL: {result.get('url', 'N/A')}")
+                lines.append(f"   Fonte: {result.get('source', 'N/A')}")
+                lines.append(f"   Relevância: {result.get('relevance_score', 'N/A')}")
+                if result.get('snippet'):
+                    lines.append(f"   Resumo: {result['snippet'][:200]}...")
+                lines.append("")
+        
+        return lines
+
+    def _format_websailor_results(self, websailor_data: Dict[str, Any]) -> List[str]:
+        """Formata resultados do WebSailor para o arquivo RES_BUSCA"""
+        lines = []
+        
+        if websailor_data.get('raw_data'):
+            raw_data = websailor_data['raw_data']
+            conteudo = raw_data.get('conteudo_consolidado', {})
+            
+            lines.append(f"Fontes analisadas: {len(conteudo.get('fontes_detalhadas', []))}")
+            lines.append(f"Qualidade média: {conteudo.get('quality_score', 'N/A')}")
+            lines.append("")
+            
+            # Adiciona principais insights
+            insights = conteudo.get('insights_principais', [])
+            if insights:
+                lines.append("PRINCIPAIS INSIGHTS:")
+                for insight in insights[:5]:
+                    lines.append(f"• {insight}")
+                lines.append("")
+        
+        return lines
 
 # Instância global
 real_search_orchestrator = RealSearchOrchestrator()
