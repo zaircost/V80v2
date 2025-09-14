@@ -58,105 +58,72 @@ class EnhancedAIManager:
     def _initialize_providers(self):
         """Inicializa todos os provedores de IA"""
 
-        # Qwen via OpenRouter (Prioridade 1 - mais confiável) - COM ROTAÇÃO DE APIS
+        # Qwen via OpenRouter (Prioridade 1 - mais confiável)
         if HAS_OPENROUTER:
-            openrouter_keys = []
-            # Coleta todas as chaves OpenRouter disponíveis
-            for i in range(1, 4):  # OPENROUTER_API_KEY_1, _2, _3
-                key = os.getenv(f"OPENROUTER_API_KEY_{i}") or (os.getenv("OPENROUTER_API_KEY") if i == 1 else None)
-                if key and key.strip():
-                    openrouter_keys.append(key.strip())
-            
-            if openrouter_keys:
+            api_key = os.getenv("OPENROUTER_API_KEY")
+            if api_key:
                 try:
-                    # Usa a primeira chave disponível
                     openrouter_client = openrouter_openai.OpenAI(
-                        api_key=openrouter_keys[0],
+                        api_key=api_key,
                         base_url="https://openrouter.ai/api/v1"
                     )
                     self.providers["openrouter"] = {
                         "client": openrouter_client,
-                        "model": "qwen/qwen-2.5-72b-instruct",
+                        "model": "qwen/qwen2.5-vl-32b-instruct:free",
                         "available": True,
-                        "supports_tools": False,
-                        "priority": 1,
-                        "api_keys": openrouter_keys,
-                        "current_key_index": 0
+                        "supports_tools": False, # Ajuste se o modelo suportar tools
+                        "priority": 1
                     }
-                    logger.info(f"✅ Qwen via OpenRouter configurado com {len(openrouter_keys)} chaves")
+                    logger.info("✅ Qwen via OpenRouter configurado")
                 except Exception as e:
                     logger.error(f"❌ Erro ao configurar Qwen/OpenRouter: {e}")
 
-        # Gemini (Prioridade 2) - COM ROTAÇÃO DE APIS
+        # Gemini (Prioridade 2)
         if HAS_GEMINI:
-            gemini_keys = []
-            # Coleta todas as chaves Gemini disponíveis
-            for i in range(1, 3):  # GEMINI_API_KEY_1, _2
-                key = os.getenv(f"GEMINI_API_KEY_{i}") or (os.getenv("GEMINI_API_KEY") if i == 1 else None)
-                if key and key.strip():
-                    gemini_keys.append(key.strip())
-            
-            if gemini_keys:
+            api_key = os.getenv("GEMINI_API_KEY")
+            if api_key:
                 try:
-                    genai.configure(api_key=gemini_keys[0])
+                    genai.configure(api_key=api_key)
                     self.providers["gemini"] = {
                         "client": genai,
                         "model": "gemini-2.0-flash-exp",
                         "available": True,
                         "supports_tools": True,
-                        "priority": 2,
-                        "api_keys": gemini_keys,
-                        "current_key_index": 0
+                        "priority": 2
                     }
-                    logger.info(f"✅ Gemini 2.0 Flash configurado com {len(gemini_keys)} chaves")
+                    logger.info("✅ Gemini 2.0 Flash configurado")
                 except Exception as e:
                     logger.error(f"❌ Erro ao configurar Gemini: {e}")
 
-        # Groq (Prioridade 3 - fallback confiável) - COM ROTAÇÃO DE APIS
+        # Groq (Prioridade 3 - fallback confiável) - ATUALIZADO PARA MODELO SUPORTADO
         if HAS_GROQ:
-            groq_keys = []
-            # Coleta todas as chaves Groq disponíveis
-            for i in range(1, 3):  # GROQ_API_KEY_1, _2
-                key = os.getenv(f"GROQ_API_KEY_{i}") or (os.getenv("GROQ_API_KEY") if i == 1 else None)
-                if key and key.strip():
-                    groq_keys.append(key.strip())
-            
-            if groq_keys:
+            api_key = os.getenv("GROQ_API_KEY")
+            if api_key:
                 try:
                     self.providers["groq"] = {
-                        "client": Groq(api_key=groq_keys[0]),
-                        "model": "llama3-70b-8192",
+                        "client": Groq(api_key=api_key),
+                        "model": "llama3-70b-8192", # Modelo atualizado - veja a tabela de depreciações
                         "available": True,
                         "supports_tools": False,
-                        "priority": 3,
-                        "api_keys": groq_keys,
-                        "current_key_index": 0
+                        "priority": 3
                     }
-                    logger.info(f"✅ Groq Llama configurado com {len(groq_keys)} chaves")
+                    logger.info("✅ Groq Llama configurado")
                 except Exception as e:
                     logger.error(f"❌ Erro ao configurar Groq: {e}")
 
-        # OpenAI (Prioridade 4) - COM ROTAÇÃO DE APIS
+        # OpenAI (Prioridade 4)
         if HAS_OPENAI:
-            openai_keys = []
-            # Coleta todas as chaves OpenAI disponíveis
-            for i in range(1, 3):  # OPENAI_API_KEY_1, _2
-                key = os.getenv(f"OPENAI_API_KEY_{i}") or (os.getenv("OPENAI_API_KEY") if i == 1 else None)
-                if key and key.strip():
-                    openai_keys.append(key.strip())
-            
-            if openai_keys:
+            api_key = os.getenv("OPENAI_API_KEY")
+            if api_key:
                 try:
                     self.providers["openai"] = {
-                        "client": openai.OpenAI(api_key=openai_keys[0]),
+                        "client": openai.OpenAI(api_key=api_key),
                         "model": "gpt-4o",
-                        "available": True,
+                        "available": True, # Habilitado
                         "supports_tools": True,
-                        "priority": 4,
-                        "api_keys": openai_keys,
-                        "current_key_index": 0
+                        "priority": 4
                     }
-                    logger.info(f"✅ OpenAI GPT-4o configurado com {len(openai_keys)} chaves")
+                    logger.info("✅ OpenAI GPT-4o configurado")
                 except Exception as e:
                     logger.error(f"❌ Erro ao configurar OpenAI: {e}")
 
@@ -168,45 +135,6 @@ class EnhancedAIManager:
             logger.info("✅ Ferramentas de busca ativa configuradas")
         except ImportError:
             logger.warning("⚠️ Search orchestrator não disponível")
-
-    def _rotate_api_key(self, provider_name: str) -> bool:
-        """Rotaciona para a próxima chave de API disponível"""
-        if provider_name not in self.providers:
-            return False
-        
-        provider = self.providers[provider_name]
-        if "api_keys" not in provider or len(provider["api_keys"]) <= 1:
-            return False
-        
-        # Rotaciona para a próxima chave
-        current_index = provider.get("current_key_index", 0)
-        next_index = (current_index + 1) % len(provider["api_keys"])
-        provider["current_key_index"] = next_index
-        
-        new_key = provider["api_keys"][next_index]
-        logger.info(f"🔄 Rotacionando chave API para {provider_name} (chave {next_index + 1}/{len(provider['api_keys'])})")
-        
-        try:
-            # Reconfigura o cliente com a nova chave
-            if provider_name == "openrouter":
-                provider["client"] = openrouter_openai.OpenAI(
-                    api_key=new_key,
-                    base_url="https://openrouter.ai/api/v1"
-                )
-            elif provider_name == "gemini":
-                genai.configure(api_key=new_key)
-                provider["client"] = genai
-            elif provider_name == "groq":
-                provider["client"] = Groq(api_key=new_key)
-            elif provider_name == "openai":
-                provider["client"] = openai.OpenAI(api_key=new_key)
-            
-            logger.info(f"✅ Chave API rotacionada com sucesso para {provider_name}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Erro ao rotacionar chave API para {provider_name}: {e}")
-            return False
 
     def _get_best_provider(self, require_tools: bool = False) -> Optional[str]:
         """Seleciona o melhor provedor disponível"""
@@ -242,12 +170,57 @@ class EnhancedAIManager:
         prompt: str,
         context: str = "",
         session_id: str = None,
-        max_search_iterations: int = 3
+        max_search_iterations: int = 3,
+        study_time_minutes: int = 5
     ) -> str:
         """
         Gera conteúdo com busca ativa - IA pode buscar informações online
         """
-        logger.info("🔍 Iniciando geração com busca ativa")
+        logger.info(f"🔍 Iniciando geração com busca ativa - Tempo de estudo: {study_time_minutes} min")
+        
+        # FASE DE ESTUDO PROFUNDO
+        if context and len(context) > 10000:  # Se há muito contexto para estudar
+            logger.info(f"📚 INICIANDO FASE DE ESTUDO PROFUNDO - {study_time_minutes} minutos")
+            study_start = datetime.now()
+            
+            # Divide o contexto em chunks para análise profunda
+            chunk_size = 8000
+            context_chunks = [context[i:i+chunk_size] for i in range(0, len(context), chunk_size)]
+            
+            study_insights = []
+            for i, chunk in enumerate(context_chunks[:10]):  # Máximo 10 chunks
+                logger.info(f"📖 Analisando chunk {i+1}/{min(len(context_chunks), 10)}")
+                
+                study_prompt = f"""
+                ANÁLISE PROFUNDA E APRENDIZADO:
+                
+                Analise profundamente este conteúdo e extraia:
+                1. Insights únicos e padrões ocultos
+                2. Tendências emergentes
+                3. Oportunidades não óbvias
+                4. Conexões entre diferentes informações
+                5. Previsões baseadas nos dados
+                
+                CONTEÚDO PARA ANÁLISE:
+                {chunk}
+                
+                Seja extremamente analítico e perspicaz. Vá além do óbvio.
+                """
+                
+                try:
+                    insight = await self.generate_text(study_prompt)
+                    if insight and len(insight) > 100:
+                        study_insights.append(insight)
+                except Exception as e:
+                    logger.warning(f"⚠️ Erro na análise do chunk {i+1}: {e}")
+            
+            # Consolida insights do estudo
+            if study_insights:
+                consolidated_study = "\n\n".join(study_insights)
+                context = f"{context}\n\nINSIGHTS DO ESTUDO PROFUNDO:\n{consolidated_study}"
+                
+            study_duration = (datetime.now() - study_start).total_seconds() / 60
+            logger.info(f"✅ Estudo profundo concluído em {study_duration:.1f} minutos")
 
         # Tenta Qwen/OpenRouter primeiro para geração com busca ativa
         if "openrouter" in self.providers and self.providers["openrouter"]["available"]:
@@ -637,33 +610,288 @@ Fontes encontradas: {total_sources}
                 return response.choices[0].message.content
 
         except Exception as e:
-            error_msg = str(e)
             logger.error(f"❌ Erro na geração de texto com {provider_name}: {e}")
-            
-            # Verificar se é erro de rate limit (429)
-            if "429" in error_msg or "rate limit" in error_msg.lower() or "quota" in error_msg.lower():
-                logger.warning(f"⚠️ Rate limit atingido para {provider_name}, tentando outro provedor")
-                
-                # Marcar provedor como temporariamente indisponível
-                self.providers[provider_name]["available"] = False
-                
-                # Tentar rotacionar chave API
-                if self._rotate_api_key(provider_name):
-                    logger.info(f"🔄 Chave rotacionada para {provider_name}, tentando novamente")
-                    self.providers[provider_name]["available"] = True
-                    return await self.generate_text(prompt, max_tokens, temperature)
-                
-                # Tentar outro provedor
-                fallback_provider = self._get_best_provider(require_tools=False)
-                if fallback_provider and fallback_provider != provider_name:
-                    logger.info(f"🔄 Usando {fallback_provider} como fallback para {provider_name}")
-                    return await self.generate_text(prompt, max_tokens, temperature)
-                
-                return f"Rate limit atingido para {provider_name} e nenhum provedor alternativo disponível."
-            
             return f"Erro na geração: {str(e)}"
 
         return "Erro: Método de geração não implementado para este provedor"
+
+    async def conduct_deep_study_phase(
+        self,
+        massive_data: Dict[str, Any],
+        session_id: str,
+        study_duration_minutes: int = 5
+    ) -> Dict[str, Any]:
+        """
+        ETAPA 2: Conduz estudo profundo de 5 minutos nos dados massivos
+        A IA se torna expert no assunto analisando o JSON gigante
+        """
+        
+        logger.info(f"🧠 ETAPA 2 - ESTUDO PROFUNDO IA iniciado - Duração: {study_duration_minutes} minutos")
+        logger.info(f"📊 Analisando {len(json.dumps(massive_data, ensure_ascii=False))/1024:.1f}KB de dados")
+        
+        import time
+        start_time = time.time()
+        study_end_time = start_time + (study_duration_minutes * 60)
+        
+        # Estrutura de conhecimento expert
+        expert_knowledge = {
+            "study_metadata": {
+                "session_id": session_id,
+                "study_start": datetime.now().isoformat(),
+                "target_duration_minutes": study_duration_minutes,
+                "data_size_analyzed_kb": len(json.dumps(massive_data, ensure_ascii=False)) / 1024,
+                "ai_provider_used": self.current_provider
+            },
+            "domain_expertise": {},
+            "market_intelligence": {},
+            "competitive_analysis": {},
+            "behavioral_insights": {},
+            "trend_analysis": {},
+            "predictive_insights": {},
+            "strategic_recommendations": {},
+            "study_phases_completed": []
+        }
+        
+        # Fases de estudo progressivo
+        study_phases = [
+            ("Análise Estrutural dos Dados", self._analyze_data_structure),
+            ("Extração de Insights de Mercado", self._extract_market_insights),
+            ("Análise Competitiva Profunda", self._analyze_competitive_landscape),
+            ("Padrões Comportamentais", self._identify_behavioral_patterns),
+            ("Análise de Tendências", self._analyze_trends),
+            ("Geração de Insights Preditivos", self._generate_predictive_insights),
+            ("Síntese Estratégica", self._synthesize_strategic_recommendations)
+        ]
+        
+        phase_duration = (study_duration_minutes * 60) / len(study_phases)
+        
+        for i, (phase_name, phase_function) in enumerate(study_phases):
+            if time.time() >= study_end_time:
+                logger.warning(f"⏰ Tempo limite atingido na fase {i+1}")
+                break
+                
+            logger.info(f"📚 Fase {i+1}/{len(study_phases)}: {phase_name}")
+            phase_start = time.time()
+            
+            try:
+                # Executa fase com timeout
+                phase_result = await asyncio.wait_for(
+                    phase_function(massive_data, expert_knowledge),
+                    timeout=phase_duration + 30  # Buffer de 30s
+                )
+                
+                expert_knowledge["study_phases_completed"].append({
+                    "phase": phase_name,
+                    "completed": True,
+                    "duration_seconds": time.time() - phase_start,
+                    "insights_generated": len(str(phase_result))
+                })
+                
+                logger.info(f"✅ {phase_name} concluída em {time.time() - phase_start:.1f}s")
+                
+            except asyncio.TimeoutError:
+                logger.warning(f"⏰ Timeout na fase {phase_name}")
+                expert_knowledge["study_phases_completed"].append({
+                    "phase": phase_name,
+                    "completed": False,
+                    "timeout": True
+                })
+            except Exception as e:
+                logger.error(f"❌ Erro na fase {phase_name}: {e}")
+                expert_knowledge["study_phases_completed"].append({
+                    "phase": phase_name,
+                    "completed": False,
+                    "error": str(e)
+                })
+        
+        # Finaliza estudo
+        total_study_time = time.time() - start_time
+        expert_knowledge["study_metadata"]["actual_duration_seconds"] = total_study_time
+        expert_knowledge["study_metadata"]["study_end"] = datetime.now().isoformat()
+        expert_knowledge["study_metadata"]["phases_completed"] = len([p for p in expert_knowledge["study_phases_completed"] if p.get("completed")])
+        expert_knowledge["study_metadata"]["efficiency_score"] = (expert_knowledge["study_metadata"]["phases_completed"] / len(study_phases)) * 100
+        
+        logger.info(f"🎓 ETAPA 2 concluída em {total_study_time/60:.1f} minutos")
+        logger.info(f"📊 Fases completadas: {expert_knowledge['study_metadata']['phases_completed']}/{len(study_phases)}")
+        
+        return expert_knowledge
+
+    async def _analyze_data_structure(self, massive_data: Dict[str, Any], expert_knowledge: Dict[str, Any]) -> Dict[str, Any]:
+        """Analisa estrutura dos dados coletados"""
+        
+        prompt = f"""
+        Analise a estrutura dos seguintes dados massivos coletados e extraia insights sobre:
+        1. Qualidade e densidade das informações
+        2. Principais fontes de dados identificadas
+        3. Gaps ou lacunas nos dados
+        4. Oportunidades de análise mais profunda
+        
+        Dados para análise (primeiros 3000 caracteres):
+        {str(massive_data)[:3000]}...
+        
+        Forneça uma análise estrutural concisa e insights acionáveis.
+        """
+        
+        analysis = await self.generate_text(prompt, max_tokens=1000)
+        expert_knowledge["domain_expertise"]["data_structure_analysis"] = analysis
+        return {"analysis": analysis}
+
+    async def _extract_market_insights(self, massive_data: Dict[str, Any], expert_knowledge: Dict[str, Any]) -> Dict[str, Any]:
+        """Extrai insights de mercado dos dados"""
+        
+        market_data = massive_data.get("market_intelligence", {})
+        web_data = massive_data.get("web_intelligence", {})
+        
+        prompt = f"""
+        Com base nos dados de mercado coletados, extraia insights profundos sobre:
+        1. Tamanho e potencial do mercado
+        2. Principais tendências identificadas
+        3. Oportunidades de negócio
+        4. Ameaças e desafios
+        5. Segmentação de mercado
+        
+        Dados de mercado:
+        {str(market_data)[:2000]}
+        
+        Dados web relevantes:
+        {str(web_data)[:2000]}
+        
+        Forneça insights estratégicos acionáveis.
+        """
+        
+        insights = await self.generate_text(prompt, max_tokens=1200)
+        expert_knowledge["market_intelligence"] = insights
+        return {"insights": insights}
+
+    async def _analyze_competitive_landscape(self, massive_data: Dict[str, Any], expert_knowledge: Dict[str, Any]) -> Dict[str, Any]:
+        """Analisa paisagem competitiva"""
+        
+        competitive_data = massive_data.get("competitive_intelligence", {})
+        
+        prompt = f"""
+        Analise a paisagem competitiva com base nos dados coletados:
+        1. Principais competidores identificados
+        2. Forças e fraquezas de cada competidor
+        3. Gaps competitivos e oportunidades
+        4. Estratégias de diferenciação recomendadas
+        5. Posicionamento ideal no mercado
+        
+        Dados competitivos:
+        {str(competitive_data)[:2500]}
+        
+        Forneça análise competitiva estratégica.
+        """
+        
+        analysis = await self.generate_text(prompt, max_tokens=1200)
+        expert_knowledge["competitive_analysis"] = analysis
+        return {"analysis": analysis}
+
+    async def _identify_behavioral_patterns(self, massive_data: Dict[str, Any], expert_knowledge: Dict[str, Any]) -> Dict[str, Any]:
+        """Identifica padrões comportamentais"""
+        
+        behavioral_data = massive_data.get("behavioral_intelligence", {})
+        social_data = massive_data.get("social_intelligence", {})
+        
+        prompt = f"""
+        Identifique padrões comportamentais dos consumidores:
+        1. Principais motivações e necessidades
+        2. Pontos de dor identificados
+        3. Jornada do cliente típica
+        4. Gatilhos de decisão de compra
+        5. Canais de comunicação preferidos
+        
+        Dados comportamentais:
+        {str(behavioral_data)[:2000]}
+        
+        Dados sociais:
+        {str(social_data)[:2000]}
+        
+        Forneça insights comportamentais profundos.
+        """
+        
+        patterns = await self.generate_text(prompt, max_tokens=1200)
+        expert_knowledge["behavioral_insights"] = patterns
+        return {"patterns": patterns}
+
+    async def _analyze_trends(self, massive_data: Dict[str, Any], expert_knowledge: Dict[str, Any]) -> Dict[str, Any]:
+        """Analisa tendências identificadas"""
+        
+        trend_data = massive_data.get("trend_intelligence", {})
+        
+        prompt = f"""
+        Analise as tendências identificadas nos dados:
+        1. Tendências emergentes mais relevantes
+        2. Velocidade de adoção das tendências
+        3. Impacto potencial no mercado
+        4. Oportunidades de capitalização
+        5. Riscos de não acompanhar as tendências
+        
+        Dados de tendências:
+        {str(trend_data)[:2500]}
+        
+        Forneça análise de tendências estratégica.
+        """
+        
+        analysis = await self.generate_text(prompt, max_tokens=1200)
+        expert_knowledge["trend_analysis"] = analysis
+        return {"analysis": analysis}
+
+    async def _generate_predictive_insights(self, massive_data: Dict[str, Any], expert_knowledge: Dict[str, Any]) -> Dict[str, Any]:
+        """Gera insights preditivos"""
+        
+        all_insights = {
+            "market": expert_knowledge.get("market_intelligence", ""),
+            "competitive": expert_knowledge.get("competitive_analysis", ""),
+            "behavioral": expert_knowledge.get("behavioral_insights", ""),
+            "trends": expert_knowledge.get("trend_analysis", "")
+        }
+        
+        prompt = f"""
+        Com base em toda a análise realizada, gere insights preditivos:
+        1. Cenários futuros mais prováveis (6-24 meses)
+        2. Oportunidades emergentes a serem exploradas
+        3. Riscos futuros a serem mitigados
+        4. Recomendações de timing para ações
+        5. Indicadores-chave para monitoramento
+        
+        Síntese das análises realizadas:
+        {str(all_insights)[:3000]}
+        
+        Forneça previsões estratégicas acionáveis.
+        """
+        
+        predictions = await self.generate_text(prompt, max_tokens=1500)
+        expert_knowledge["predictive_insights"] = predictions
+        return {"predictions": predictions}
+
+    async def _synthesize_strategic_recommendations(self, massive_data: Dict[str, Any], expert_knowledge: Dict[str, Any]) -> Dict[str, Any]:
+        """Sintetiza recomendações estratégicas finais"""
+        
+        all_knowledge = {
+            "market": expert_knowledge.get("market_intelligence", ""),
+            "competitive": expert_knowledge.get("competitive_analysis", ""),
+            "behavioral": expert_knowledge.get("behavioral_insights", ""),
+            "trends": expert_knowledge.get("trend_analysis", ""),
+            "predictions": expert_knowledge.get("predictive_insights", "")
+        }
+        
+        prompt = f"""
+        Sintetize todas as análises em recomendações estratégicas finais:
+        1. Top 5 prioridades estratégicas imediatas
+        2. Plano de ação para próximos 90 dias
+        3. Investimentos recomendados
+        4. Métricas de sucesso a acompanhar
+        5. Próximos passos específicos
+        
+        Todo o conhecimento adquirido:
+        {str(all_knowledge)[:4000]}
+        
+        Forneça recomendações estratégicas definitivas e acionáveis.
+        """
+        
+        recommendations = await self.generate_text(prompt, max_tokens=1500)
+        expert_knowledge["strategic_recommendations"] = recommendations
+        return {"recommendations": recommendations}
 
 
 # Instância global
