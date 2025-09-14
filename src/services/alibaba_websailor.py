@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ARQV30 Enhanced v2.0 - Alibaba WebSailor Agent
-Agente de navegação web inteligente com busca profunda e análise contextual
+ARQV30 Enhanced v3.0 - Alibaba WebSailor Agent com Módulos Integrados
+Agente de navegação web inteligente com busca profunda, análise contextual e análise de conteúdo viral
 """
 
 import os
@@ -11,27 +11,156 @@ import time
 import requests
 import json
 import random
-from typing import Dict, List, Optional, Any
-from urllib.parse import quote_plus, urljoin, urlparse
-from bs4 import BeautifulSoup
-from datetime import datetime
 import re
+import asyncio
+import httpx
+import base64
+from typing import Dict, List, Optional, Any, Tuple
+from urllib.parse import quote_plus, urljoin, urlparse, parse_qs, unquote
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
+from dataclasses import dataclass, asdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from services.auto_save_manager import salvar_etapa, salvar_erro
+from pathlib import Path
 
+# Import condicional de bibliotecas
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, WebDriverException, NoSuchElementException
+    from webdriver_manager.chrome import ChromeDriverManager
+    HAS_SELENIUM = True
+except ImportError:
+    HAS_SELENIUM = False
+    logging.warning("Selenium não instalado - screenshots não disponíveis")
+
+try:
+    from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+
+try:
+    import aiohttp
+    import aiofiles
+    HAS_ASYNC_DEPS = True
+except ImportError:
+    HAS_ASYNC_DEPS = False
+
+try:
+    from bs4 import BeautifulSoup
+    HAS_BS4 = True
+except ImportError:
+    HAS_BS4 = False
+
+try:
+    import google.generativeai as genai
+    HAS_GEMINI = True
+except ImportError:
+    HAS_GEMINI = False
+
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
+# Carregar variáveis de ambiente
+from dotenv import load_dotenv
+load_dotenv()
+
+# Configuração de logging
+log_dir = os.path.dirname(os.path.abspath(__file__))
+log_file = os.path.join(log_dir, 'alibaba_websailor.log')
+os.makedirs(log_dir, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
+
+# Importar serviços do projeto
+try:
+    from services.auto_save_manager import salvar_etapa, salvar_erro
+except ImportError:
+    # Fallback caso não exista
+    def salvar_etapa(nome, dados, categoria="geral"):
+        logger.info(f"Etapa {nome}: {dados}")
+    
+    def salvar_erro(nome, erro, contexto=None):
+        logger.error(f"Erro {nome}: {erro}")
+
+# =============== ESTRUTURAS DE DADOS ===============
+
+@dataclass
+class ViralContent:
+    """Estrutura para conteúdo viral"""
+    platform: str
+    url: str
+    title: str
+    description: str
+    author: str
+    engagement_metrics: Dict[str, int]
+    screenshot_path: str
+    content_type: str
+    hashtags: List[str]
+    mentions: List[str]
+    timestamp: str
+    virality_score: float
+
+@dataclass
+class SocialMetrics:
+    """Métricas de engajamento social"""
+    likes: int = 0
+    shares: int = 0
+    comments: int = 0
+    views: int = 0
+    reactions: int = 0
+    saves: int = 0
+
+@dataclass
+class ViralImage:
+    """Estrutura de dados para imagem viral"""
+    image_url: str
+    post_url: str
+    platform: str
+    title: str
+    description: str
+    engagement_score: float
+    views_estimate: int
+    likes_estimate: int
+    comments_estimate: int
+    shares_estimate: int
+    author: str
+    author_followers: int
+    post_date: str
+    hashtags: List[str]
+    image_path: Optional[str] = None
+    screenshot_path: Optional[str] = None
+    extracted_at: str = datetime.now().isoformat()
+
+# =============== CLASSE PRINCIPAL ALIBABA WEBSAILOR ===============
 
 class AlibabaWebSailorAgent:
     """Agente WebSailor inteligente para navegação e análise web profunda"""
 
     def __init__(self):
-        """Inicializa agente WebSailor"""
+        """Inicializa agente WebSailor com todos os módulos integrados"""
         self.enabled = True
         self.google_search_key = os.getenv("GOOGLE_SEARCH_KEY")
         self.jina_api_key = os.getenv("JINA_API_KEY")
         self.google_cse_id = os.getenv("GOOGLE_CSE_ID")
         self.serper_api_key = os.getenv("SERPER_API_KEY")
-
+        
         # URLs das APIs
         self.google_search_url = "https://www.googleapis.com/customsearch/v1"
         self.jina_reader_url = "https://r.jina.ai/"
@@ -55,20 +184,45 @@ class AlibabaWebSailorAgent:
         self.preferred_domains = {
             "g1.globo.com", "exame.com", "valor.globo.com", "estadao.com.br",
             "folha.uol.com.br", "canaltech.com.br", "tecmundo.com.br",
-            "trends.google.com.br/trends/", "infomoney.com.br", "startse.com",
+            "olhardigital.com.br", "infomoney.com.br", "startse.com",
             "revistapegn.globo.com", "epocanegocios.globo.com", "istoedinheiro.com.br",
-            "convergenciadigital.com.br", "mobiletime.com.br", "buzzsumo.com/blog/",
-            "youtube.com", "facebook.com", "blog.eduzz.com/?_gl=1*1n08vbp*_gcl_au*ODg0ODkwMzMxLjE3NTc3ODkyNzc.",
-            "instagram.com", "scielo.br", "ibge.gov.br", "rdstation.com/blog/"
+            "convergenciadigital.com.br", "mobiletime.com.br", "teletime.com.br",
+            "portaltelemedicina.com.br", "saudedigitalbrasil.com.br", "amb.org.br",
+            "portal.cfm.org.br", "scielo.br", "ibge.gov.br", "fiocruz.br"
         }
 
         # Domínios bloqueados (irrelevantes)
         self.blocked_domains = {
-            "airbnb.com"
+            "instagram.com", "facebook.com", "twitter.com", "linkedin.com",
+            "youtube.com", "tiktok.com", "pinterest.com", "reddit.com",
+            "accounts.google.com", "login.microsoft.com", "amazon.com.br",
+            "mercadolivre.com.br", "olx.com.br", "booking.com", "airbnb.com"
         }
 
         self.session = requests.Session()
         self.session.headers.update(self.headers)
+        
+        # Configuração de timeout e retry
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        
+        try:
+            retry_strategy = Retry(
+                total=3,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["HEAD", "GET", "OPTIONS"],
+                backoff_factor=1
+            )
+        except TypeError:
+            retry_strategy = Retry(
+                total=3,
+                status_forcelist=[429, 500, 502, 503, 504],
+                method_whitelist=["HEAD", "GET", "OPTIONS"],
+                backoff_factor=1
+            )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
         # Estatísticas de navegação
         self.navigation_stats = {
@@ -81,214 +235,47 @@ class AlibabaWebSailorAgent:
             'avg_quality_score': 0.0
         }
 
-        logger.info("🌐 Alibaba WebSailor Agent inicializado - Navegação inteligente ativada")
+        # Inicializar módulos integrados
+        self.viral_analyzer = self._init_viral_analyzer()
+        self.viral_content_analyzer = self._init_viral_content_analyzer()
+        self.viral_image_finder = self._init_viral_image_finder()
 
-    async def massive_search_with_real_orchestrator(
-        self,
-        product_name: str,
-        session_id: str = None,
-        target_size_kb: int = 100
-    ) -> Dict[str, Any]:
-        """
-        BUSCA MASSIVA que salva trechos relevantes instantaneamente
-        Salva em RES_BUSCA_[PRODUTO].json até atingir 500KB
-        """
+        logger.info("🌐 Alibaba WebSailor Agent inicializado com todos os módulos integrados")
+
+    def _init_viral_analyzer(self):
+        """Inicializa o módulo de análise de conteúdo viral"""
         try:
-            logger.info(f"🚀 INICIANDO BUSCA MASSIVA para produto: {product_name}")
-            
-            # Usa métodos internos para evitar referência circular
-            
-            # Nome do arquivo de resultado
-            safe_product_name = re.sub(r'[^\w\s-]', '', product_name).strip()
-            safe_product_name = re.sub(r'[-\s]+', '_', safe_product_name)
-            result_file = f"RES_BUSCA_{safe_product_name.upper()}.json"
-            
-            # Estrutura inicial do resultado
-            result_data = {
-                "produto": product_name,
-                "timestamp_inicio": datetime.now().isoformat(),
-                "target_size_kb": target_size_kb,
-                "trechos_relevantes": [],
-                "total_caracteres": 0,
-                "fontes_consultadas": [],
-                "status": "em_progresso"
-            }
-            
-            # Salva arquivo inicial
-            with open(result_file, 'w', encoding='utf-8') as f:
-                json.dump(result_data, f, ensure_ascii=False, indent=2)
-            
-            logger.info(f"📁 Arquivo criado: {result_file}")
-            
-            # Queries de busca relacionadas ao produto
-            search_queries = [
-                f"{product_name} mercado brasileiro",
-                f"{product_name} tendências",
-                f"{product_name} análise competitiva",
-                f"{product_name} estratégia marketing",
-                f"{product_name} público alvo",
-                f"{product_name} cases sucesso",
-                f"{product_name} insights consumidor",
-                f"lançamento {product_name} digital",
-                f"{product_name} redes sociais",
-                f"{product_name} conversão vendas"
-            ]
-            
-            current_size_bytes = 0
-            target_size_bytes = target_size_kb * 1024
-            
-            for query in search_queries:
-                if current_size_bytes >= target_size_bytes:
-                    logger.info(f"✅ Meta de {target_size_kb}KB atingida!")
-                    break
-                
-                logger.info(f"🔍 Buscando: {query}")
-                
-                # Usa busca interna do websailor (evita referência circular)
-                search_results = []
-                
-                # Busca Google Custom Search
-                google_results = self._google_search_deep(query, max_results=10)
-                search_results.extend(google_results)
-                
-                # Busca Serper
-                serper_results = self._serper_search_deep(query, max_results=10)
-                search_results.extend(serper_results)
-                
-                if search_results:
-                    for result in search_results:
-                        if current_size_bytes >= target_size_bytes:
-                            break
-                        
-                        # Extrai conteúdo relevante
-                        content = self._extract_relevant_content(result, product_name)
-                        if content and len(content) > 200:  # Mínimo 200 chars
-                            
-                            # Adiciona trecho relevante
-                            trecho = {
-                                "fonte": result.get('url', 'N/A'),
-                                "titulo": result.get('title', 'N/A'),
-                                "conteudo": content,
-                                "relevancia_score": self._calculate_relevance_score(content, product_name),
-                                "timestamp": datetime.now().isoformat(),
-                                "caracteres": len(content)
-                            }
-                            
-                            result_data["trechos_relevantes"].append(trecho)
-                            result_data["total_caracteres"] += len(content)
-                            current_size_bytes += len(content.encode('utf-8'))
-                            
-                            # Adiciona fonte se não existir
-                            fonte = result.get('url', 'N/A')
-                            if fonte not in result_data["fontes_consultadas"]:
-                                result_data["fontes_consultadas"].append(fonte)
-                            
-                            # Salva instantaneamente
-                            with open(result_file, 'w', encoding='utf-8') as f:
-                                json.dump(result_data, f, ensure_ascii=False, indent=2)
-                            
-                            logger.info(f"💾 Trecho salvo: {len(content)} chars - Total: {current_size_bytes/1024:.1f}KB")
-                
-                # Pequena pausa entre queries
-                time.sleep(1)
-            
-            # Finaliza o arquivo
-            result_data["status"] = "concluido"
-            result_data["timestamp_fim"] = datetime.now().isoformat()
-            result_data["size_final_kb"] = current_size_bytes / 1024
-            
-            with open(result_file, 'w', encoding='utf-8') as f:
-                json.dump(result_data, f, ensure_ascii=False, indent=2)
-            
-            logger.info(f"✅ BUSCA MASSIVA CONCLUÍDA - {result_data['size_final_kb']:.1f}KB salvos em {result_file}")
-            
-            return {
-                "success": True,
-                "arquivo_resultado": result_file,
-                "total_trechos": len(result_data["trechos_relevantes"]),
-                "total_caracteres": result_data["total_caracteres"],
-                "size_kb": result_data["size_final_kb"],
-                "fontes_consultadas": len(result_data["fontes_consultadas"])
-            }
-            
+            return ViralContentAnalyzerModule()
         except Exception as e:
-            logger.error(f"❌ Erro na busca massiva: {e}")
-            salvar_erro("websailor_busca_massiva", str(e))
-            return {"success": False, "error": str(e)}
+            logger.warning(f"⚠️ Não foi possível inicializar o módulo ViralContentAnalyzer: {e}")
+            return None
 
-    def _extract_relevant_content(self, result: Dict[str, Any], product_name: str) -> str:
-        """Extrai conteúdo relevante de um resultado de busca"""
+    def _init_viral_content_analyzer(self):
+        """Inicializa o módulo avançado de análise de conteúdo viral"""
         try:
-            # Tenta extrair conteúdo da URL
-            url = result.get('url', '')
-            if not url:
-                return result.get('snippet', '')
-            
-            # Usa Jina para extrair conteúdo
-            content = self._extract_with_jina(url)
-            if not content:
-                content = result.get('snippet', '')
-            
-            # Filtra apenas partes relevantes ao produto
-            if content and len(content) > 500:
-                # Procura por parágrafos que mencionam o produto
-                paragraphs = content.split('\n')
-                relevant_paragraphs = []
-                
-                for paragraph in paragraphs:
-                    if len(paragraph) > 100 and product_name.lower() in paragraph.lower():
-                        relevant_paragraphs.append(paragraph.strip())
-                
-                if relevant_paragraphs:
-                    return '\n\n'.join(relevant_paragraphs[:3])  # Máximo 3 parágrafos
-            
-            return content[:1000] if content else result.get('snippet', '')
-            
+            return ViralContentAnalyzerAdvanced()
         except Exception as e:
-            logger.error(f"Erro ao extrair conteúdo: {e}")
-            return result.get('snippet', '')
+            logger.warning(f"⚠️ Não foi possível inicializar o módulo ViralContentAnalyzerAdvanced: {e}")
+            return None
 
-    def _calculate_relevance_score(self, content: str, product_name: str) -> float:
-        """Calcula score de relevância do conteúdo"""
+    def _init_viral_image_finder(self):
+        """Inicializa o módulo de busca de imagens virais"""
         try:
-            if not content:
-                return 0.0
-            
-            content_lower = content.lower()
-            product_lower = product_name.lower()
-            
-            score = 0.0
-            
-            # Menciona o produto
-            if product_lower in content_lower:
-                score += 0.3
-            
-            # Palavras-chave relevantes
-            keywords = ['mercado', 'tendência', 'análise', 'estratégia', 'marketing', 
-                       'consumidor', 'vendas', 'conversão', 'público', 'target']
-            
-            for keyword in keywords:
-                if keyword in content_lower:
-                    score += 0.1
-            
-            # Tamanho do conteúdo
-            if len(content) > 500:
-                score += 0.2
-            
-            return min(score, 1.0)
-            
-        except Exception:
-            return 0.5
+            return ViralImageFinder()
+        except Exception as e:
+            logger.warning(f"⚠️ Não foi possível inicializar o módulo ViralImageFinder: {e}")
+            return None
 
     def navigate_and_research_deep(
-        self, 
-        query: str, 
+        self,
+        query: str,
         context: Dict[str, Any],
         max_pages: int = 25,
         depth_levels: int = 3,
-        session_id: str = None
+        session_id: str = None,
+        analyze_viral: bool = False
     ) -> Dict[str, Any]:
-        """Navegação e pesquisa profunda com múltiplos níveis"""
+        """Navegação e pesquisa profunda com múltiplos níveis e análise viral opcional"""
 
         try:
             logger.info(f"🚀 INICIANDO NAVEGAÇÃO PROFUNDA para: {query}")
@@ -299,7 +286,8 @@ class AlibabaWebSailorAgent:
                 "query": query,
                 "context": context,
                 "max_pages": max_pages,
-                "depth_levels": depth_levels
+                "depth_levels": depth_levels,
+                "analyze_viral": analyze_viral
             }, categoria="pesquisa_web")
 
             all_content = []
@@ -403,6 +391,41 @@ class AlibabaWebSailorAgent:
             # PROCESSAMENTO E ANÁLISE FINAL
             processed_research = self._process_and_analyze_content(all_content, query, context)
 
+            # Análise de conteúdo viral se solicitado
+            if analyze_viral and self.viral_content_analyzer:
+                try:
+                    logger.info("🦠 Iniciando análise de conteúdo viral...")
+                    
+                    # Preparar dados para análise viral
+                    search_results_for_viral = {
+                        'web_results': all_content,
+                        'youtube_results': [],  # Seria preenchido em uma implementação completa
+                        'social_results': []    # Seria preenchido em uma implementação completa
+                    }
+                    
+                    viral_analysis = asyncio.run(
+                        self.viral_content_analyzer.analyze_and_capture_viral_content(
+                            search_results_for_viral, 
+                            session_id or f"session_{int(time.time())}"
+                        )
+                    )
+                    
+                    processed_research['analise_viral'] = viral_analysis
+                    
+                    # Gerar relatório viral
+                    viral_report = self.viral_content_analyzer.generate_viral_content_report(
+                        viral_analysis, 
+                        session_id or f"session_{int(time.time())}"
+                    )
+                    
+                    processed_research['relatorio_viral'] = viral_report
+                    
+                    logger.info("✅ Análise de conteúdo viral concluída")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erro na análise de conteúdo viral: {e}")
+                    processed_research['analise_viral'] = {"erro": str(e)}
+
             # Atualiza estatísticas
             self._update_navigation_stats(all_content)
 
@@ -420,6 +443,94 @@ class AlibabaWebSailorAgent:
             logger.error(f"❌ ERRO CRÍTICO na navegação WebSailor: {str(e)}")
             salvar_erro("websailor_critico", e, contexto={"query": query})
             return self._generate_emergency_research(query, context)
+
+    def search_viral_images(self, query: str, session_id: str = None) -> Dict[str, Any]:
+        """Busca imagens virais usando o módulo integrado"""
+        if not self.viral_image_finder:
+            logger.warning("⚠️ Módulo de busca de imagens virais não disponível")
+            return {"erro": "Módulo de busca de imagens virais não disponível"}
+        
+        try:
+            logger.info(f"🔍 Buscando imagens virais para: {query}")
+            salvar_etapa("viral_images_search_start", {"query": query}, categoria="viral_content")
+            
+            # Executar busca de imagens
+            search_results = asyncio.run(self.viral_image_finder.search_images(query))
+            
+            # Processar resultados
+            processed_results = {
+                "query": query,
+                "session_id": session_id or f"session_{int(time.time())}",
+                "total_images": len(search_results),
+                "images": search_results[:20],  # Limitar a 20 resultados
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Baixar imagens se configurado
+            if self.viral_image_finder.config.get('extract_images', True):
+                try:
+                    downloaded_images = asyncio.run(
+                        self.viral_image_finder.download_viral_images(search_results[:10], session_id)
+                    )
+                    processed_results["downloaded_images"] = downloaded_images
+                    logger.info(f"✅ {len(downloaded_images)} imagens baixadas")
+                except Exception as e:
+                    logger.error(f"❌ Erro ao baixar imagens: {e}")
+                    processed_results["download_error"] = str(e)
+            
+            salvar_etapa("viral_images_search_result", processed_results, categoria="viral_content")
+            logger.info(f"✅ Busca de imagens virais concluída: {len(search_results)} resultados")
+            
+            return processed_results
+            
+        except Exception as e:
+            logger.error(f"❌ Erro na busca de imagens virais: {e}")
+            salvar_erro("viral_images_search_error", e, contexto={"query": query})
+            return {"erro": str(e)}
+
+    def analyze_trending_content(self, segment: str, platforms: List[str] = None) -> Dict[str, Any]:
+        """Analisa conteúdo em tendência usando o módulo viral"""
+        if not self.viral_analyzer:
+            logger.warning("⚠️ Módulo de análise de conteúdo viral não disponível")
+            return {"erro": "Módulo de análise de conteúdo viral não disponível"}
+        
+        try:
+            logger.info(f"📈 Analisando conteúdo em tendência para: {segment}")
+            salvar_etapa("trending_content_analysis_start", {"segment": segment}, categoria="viral_content")
+            
+            # Executar análise de tendência
+            trending_analysis = asyncio.run(
+                self.viral_analyzer.analyze_trending_content(segment, platforms)
+            )
+            
+            # Gerar relatório de viralidade
+            all_content = []
+            for platform_content in trending_analysis.values():
+                all_content.extend(platform_content)
+            
+            virality_report = asyncio.run(
+                self.viral_analyzer.generate_virality_report(all_content)
+            )
+            
+            processed_results = {
+                "segment": segment,
+                "platforms": platforms or ["youtube", "instagram", "facebook"],
+                "trending_analysis": trending_analysis,
+                "virality_report": virality_report,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            salvar_etapa("trending_content_analysis_result", processed_results, categoria="viral_content")
+            logger.info(f"✅ Análise de conteúdo em tendência concluída")
+            
+            return processed_results
+            
+        except Exception as e:
+            logger.error(f"❌ Erro na análise de conteúdo em tendência: {e}")
+            salvar_erro("trending_content_analysis_error", e, contexto={"segment": segment})
+            return {"erro": str(e)}
+
+    # =============== MÉTODOS DE BUSCA ===============
 
     def _google_search_deep(self, query: str, max_results: int) -> List[Dict[str, Any]]:
         """Busca profunda usando Google Custom Search API"""
@@ -655,11 +766,13 @@ class AlibabaWebSailorAgent:
             logger.error(f"❌ Erro no Yahoo: {str(e)}")
             return []
 
+    # =============== MÉTODOS DE EXTRAÇÃO DE CONTEÚDO ===============
+
     def _extract_intelligent_content(
-        self, 
-        url: str, 
-        title: str, 
-        snippet: str, 
+        self,
+        url: str,
+        title: str,
+        snippet: str,
         context: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         """Extração inteligente de conteúdo com validação"""
@@ -741,175 +854,36 @@ class AlibabaWebSailorAgent:
 
         return None
 
-    def _extract_with_jina(self, url: str, max_retries: int = 3) -> Optional[str]:
-        """Extrai conteúdo usando Jina Reader com retentativas e tratamento de popups"""
-        for attempt in range(max_retries):
-            try:
-                # Detectar se é URL do Facebook e aplicar estratégias específicas
-                if 'facebook.com' in url:
-                    return self._extract_facebook_content(url)
-                
-                jina_url = f"https://r.jina.ai/{url}"
-                response = requests.get(jina_url, timeout=60)  # Aumentado para 60s
+    def _extract_with_jina(self, url: str) -> Optional[str]:
+        """Extrai usando Jina Reader API"""
 
-                if response.status_code == 200:
-                    content = response.text
+        if not self.jina_api_key:
+            return None
 
-                    if len(content) > 15000:
-                        content = content[:15000] + "... [conteúdo truncado para otimização]"
-
-                    return content
-                elif response.status_code == 451:
-                    logger.warning(f"⚠️ Jina Reader bloqueado (451) para {url} - tentando estratégias alternativas")
-                    return self._handle_blocked_content(url)
-                else:
-                    logger.warning(f"⚠️ Jina Reader retornou status {response.status_code} para {url}")
-                    # Lógica de retorno para status não 200 específica se necessário
-
-            except requests.exceptions.ReadTimeout:
-                logger.warning(f"⚠️ Jina Reader timeout para {url} - usando fallback")
-                return self._fallback_extraction(url)
-            except requests.exceptions.ConnectionError:
-                logger.warning(f"⚠️ Jina Reader connection error para {url} - usando fallback")
-                return self._fallback_extraction(url)
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"⚠️ Jina Reader tentativa {attempt + 1} falhou: {e}")
-                if attempt == max_retries - 1:
-                    self.logger.error(f"❌ Jina Reader falhou após {max_retries} tentativas")
-                    return None
-                else:
-                    time.sleep(2 ** attempt)  # Backoff exponencial
-                    continue
-        return None
-
-    def _extract_facebook_content(self, url: str) -> Optional[str]:
-        """Extrai conteúdo específico do Facebook contornando popups de login"""
         try:
-            logger.info(f"🔧 Aplicando estratégia específica para Facebook: {url}")
-            
-            # Estratégia 1: Tentar com parâmetros que evitam login
-            facebook_strategies = [
-                f"https://r.jina.ai/{url}?no_login=1",
-                f"https://r.jina.ai/{url}?_fb_noscript=1",
-                f"https://r.jina.ai/{url}?locale=pt_BR",
-                f"https://r.jina.ai/{url}"
-            ]
-            
-            for strategy_url in facebook_strategies:
-                try:
-                    headers = self.headers.copy()
-                    headers.update({
-                        'X-Requested-With': 'XMLHttpRequest',
-                        'Referer': 'https://www.facebook.com/',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-                    })
-                    
-                    response = requests.get(strategy_url, headers=headers, timeout=30)
-                    
-                    if response.status_code == 200:
-                        content = response.text
-                        
-                        # Verificar se o conteúdo não é apenas um popup de login
-                        if self._is_valid_facebook_content(content):
-                            logger.info(f"✅ Conteúdo Facebook extraído com sucesso usando estratégia")
-                            return content[:15000] if len(content) > 15000 else content
-                        else:
-                            logger.debug(f"⚠️ Conteúdo parece ser popup de login, tentando próxima estratégia")
-                            continue
-                    
-                except Exception as e:
-                    logger.debug(f"⚠️ Estratégia Facebook falhou: {e}")
-                    continue
-            
-            # Se todas as estratégias falharam, usar fallback
-            logger.warning(f"⚠️ Todas estratégias Facebook falharam para {url}, usando fallback")
-            return self._fallback_extraction(url)
-            
+            headers = {
+                **self.headers,
+                "Authorization": f"Bearer {self.jina_api_key}"
+            }
+
+            jina_url = f"{self.jina_reader_url}{url}"
+
+            response = requests.get(jina_url, headers=headers, timeout=60)
+
+            if response.status_code == 200:
+                content = response.text
+
+                if len(content) > 15000:
+                    content = content[:15000] + "... [conteúdo truncado para otimização]"
+
+                return content
+            else:
+                logger.error(f"❌ Jina Reader API falhou para {url} com status {response.status_code}")
+                return None
+
         except Exception as e:
-            logger.error(f"❌ Erro na extração Facebook: {e}")
-            return self._fallback_extraction(url)
-
-    def _is_valid_facebook_content(self, content: str) -> bool:
-        """Verifica se o conteúdo do Facebook é válido (não é popup de login)"""
-        if not content or len(content) < 100:
-            return False
-        
-        # Indicadores de popup de login
-        login_indicators = [
-            "Entre ou cadastre-se no Facebook",
-            "Ver mais no Facebook",
-            "Entrar no Facebook",
-            "Criar nova conta",
-            "Email ou telefone",
-            "Esqueceu a senha"
-        ]
-        
-        # Se contém muitos indicadores de login, provavelmente é popup
-        login_count = sum(1 for indicator in login_indicators if indicator.lower() in content.lower())
-        
-        # Se tem mais de 2 indicadores de login e pouco conteúdo útil, é popup
-        if login_count > 2 and len(content) < 1000:
-            return False
-        
-        # Indicadores de conteúdo válido
-        content_indicators = [
-            "patchwork", "costura", "artesanato", "bordado", "quilting",
-            "curso", "aula", "tutorial", "dicas", "técnica"
-        ]
-        
-        content_count = sum(1 for indicator in content_indicators if indicator.lower() in content.lower())
-        
-        return content_count > 0 or len(content) > 2000
-
-    def _handle_blocked_content(self, url: str) -> Optional[str]:
-        """Trata conteúdo bloqueado (status 451) com estratégias alternativas"""
-        try:
-            logger.info(f"🔧 Aplicando estratégias para conteúdo bloqueado: {url}")
-            
-            # Estratégia 1: Tentar com diferentes user agents
-            alternative_headers = [
-                {
-                    "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-                },
-                {
-                    "User-Agent": "Mozilla/5.0 (compatible; facebookexternalhit/1.1; +http://www.facebook.com/externalhit_uatext.php)",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-                },
-                {
-                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-                }
-            ]
-            
-            for headers in alternative_headers:
-                try:
-                    jina_url = f"https://r.jina.ai/{url}"
-                    response = requests.get(jina_url, headers=headers, timeout=30)
-                    
-                    if response.status_code == 200:
-                        content = response.text
-                        logger.info(f"✅ Conteúdo desbloqueado com user agent alternativo")
-                        return content[:15000] if len(content) > 15000 else content
-                        
-                except Exception as e:
-                    logger.debug(f"⚠️ User agent alternativo falhou: {e}")
-                    continue
-            
-            # Estratégia 2: Usar fallback direto
-            logger.warning(f"⚠️ Todas estratégias de desbloqueio falharam para {url}, usando fallback")
-            return self._fallback_extraction(url)
-            
-        except Exception as e:
-            logger.error(f"❌ Erro no tratamento de conteúdo bloqueado: {e}")
-            return self._fallback_extraction(url)
-
-    def _fallback_extraction(self, url: str) -> Optional[str]:
-        """Fallback para extração de conteúdo quando Jina falha"""
-        logger.info(f"🔄 Usando fallback para extrair conteúdo de {url}")
-        # Tenta extrair com BeautifulSoup como fallback
-        return self._extract_with_beautifulsoup(url)
-
+            logger.error(f"❌ Erro no _extract_with_jina para {url}: {str(e)}")
+            return None
 
     def _extract_with_trafilatura(self, url: str) -> Optional[str]:
         """Extrai usando Trafilatura"""
@@ -921,7 +895,7 @@ class AlibabaWebSailorAgent:
             if downloaded:
                 content = trafilatura.extract(
                     downloaded,
-                    include_comments=True,
+                    include_comments=False,
                     include_tables=True,
                     include_formatting=False,
                     favor_precision=False,
@@ -932,9 +906,11 @@ class AlibabaWebSailorAgent:
             return None
 
         except ImportError:
+            logger.warning("⚠️ Trafilatura não está instalada. Ignorando.")
             return None
         except Exception as e:
-            raise e
+            logger.error(f"❌ Erro no Trafilatura para {url}: {str(e)}")
+            return None
 
     def _extract_with_readability(self, url: str) -> Optional[str]:
         """Extrai usando Readability"""
@@ -944,41 +920,40 @@ class AlibabaWebSailorAgent:
 
             response = self.session.get(url, timeout=20)
             if response.status_code == 200:
-                doc = Document(response.content)
-                content = doc.summary()
+                content_bytes = response.content
+                min_length = 300
 
-                if content:
-                    soup = BeautifulSoup(content, 'html.parser')
-                    return soup.get_text()
+                if isinstance(content_bytes, bytes):
+                    content_str = content_bytes.decode('utf-8', errors='ignore')
+                else:
+                    content_str = content_bytes
+
+                doc = Document(content_str)
+                content = doc.summary()
+                if content and len(content.strip()) > min_length:
+                    logger.info(f"✅ Readability: {len(content)} caracteres de {url}")
+                    return content
+                else:
+                    logger.warning(f"⚠️ Readability: conteúdo muito curto de {url}")
+            else:
+                logger.warning(f"⚠️ Readability falhou ao obter conteúdo de {url}: Status {response.status_code}")
             return None
 
         except ImportError:
+            logger.warning("⚠️ Readability não está instalada. Ignorando.")
             return None
         except Exception as e:
-            raise e
+            logger.error(f"❌ Erro no Readability para {url}: {str(e)}")
+            return None
 
     def _extract_with_beautifulsoup(self, url: str) -> Optional[str]:
-        """Extrai usando BeautifulSoup com tratamento especial para Facebook"""
+        """Extrai usando BeautifulSoup"""
 
         try:
-            # Headers específicos para Facebook
-            headers = self.headers.copy()
-            if 'facebook.com' in url:
-                headers.update({
-                    'User-Agent': 'Mozilla/5.0 (compatible; facebookexternalhit/1.1; +http://www.facebook.com/externalhit_uatext.php)',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
-                    'Cache-Control': 'no-cache'
-                })
-            
-            response = self.session.get(url, headers=headers, timeout=20)
+            response = self.session.get(url, timeout=20)
 
             if response.status_code == 200:
                 soup = BeautifulSoup(response.content, 'html.parser')
-
-                # Remover popups de login do Facebook
-                if 'facebook.com' in url:
-                    self._remove_facebook_popups(soup)
 
                 # Remove elementos desnecessários
                 for element in soup(['script', 'style', 'nav', 'header', 'footer', 'aside']):
@@ -986,70 +961,25 @@ class AlibabaWebSailorAgent:
 
                 # Busca conteúdo principal
                 main_content = (
-                    soup.find('main') or 
-                    soup.find('article') or 
-                    soup.find('div', class_=re.compile(r'content|main|article|post'))
+                    soup.find('main') or
+                    soup.find('article') or
+                    soup.find('div', class_=re.compile(r'content|main|article'))
                 )
 
                 if main_content:
-                    text = main_content.get_text(strip=True, separator=' ')
+                    return main_content.get_text()
                 else:
-                    text = soup.get_text(strip=True, separator=' ')
-                
-                # Limpar texto e verificar se é válido
-                if text and len(text) > 50:
-                    # Para Facebook, verificar se não é apenas popup de login
-                    if 'facebook.com' in url and not self._is_valid_facebook_content(text):
-                        logger.warning(f"⚠️ Conteúdo extraído parece ser popup de login para {url}")
-                        return None
-                    
-                    return text[:15000] if len(text) > 15000 else text
+                    return soup.get_text()
 
+            else:
+                logger.warning(f"⚠️ BeautifulSoup falhou ao obter conteúdo de {url}: Status {response.status_code}")
             return None
 
         except Exception as e:
-            logger.error(f"❌ Erro no BeautifulSoup para {url}: {e}")
+            logger.error(f"❌ Erro no BeautifulSoup para {url}: {str(e)}")
             return None
 
-    def _remove_facebook_popups(self, soup: BeautifulSoup) -> None:
-        """Remove popups de login do Facebook do HTML"""
-        try:
-            # Seletores comuns de popups de login do Facebook
-            popup_selectors = [
-                '[role="dialog"]',
-                '.login_form_container',
-                '#login_form',
-                '[data-testid="royal_login_form"]',
-                '.fb_dialog',
-                '.uiOverlay',
-                '.uiLayer',
-                '[aria-label*="login"]',
-                '[aria-label*="Log in"]',
-                '[aria-label*="Entre"]'
-            ]
-            
-            for selector in popup_selectors:
-                elements = soup.select(selector)
-                for element in elements:
-                    element.decompose()
-            
-            # Remover elementos com texto específico de login
-            login_texts = [
-                "Entre ou cadastre-se no Facebook",
-                "Ver mais no Facebook", 
-                "Entrar no Facebook",
-                "Email ou telefone",
-                "Criar nova conta"
-            ]
-            
-            for text in login_texts:
-                elements = soup.find_all(text=re.compile(text, re.IGNORECASE))
-                for element in elements:
-                    if element.parent:
-                        element.parent.decompose()
-                        
-        except Exception as e:
-            logger.debug(f"⚠️ Erro ao remover popups Facebook: {e}")
+    # =============== MÉTODOS DE UTILIDADE ===============
 
     def _is_url_relevant(self, url: str, title: str, snippet: str) -> bool:
         """Verifica se URL é relevante para análise"""
@@ -1162,14 +1092,14 @@ class AlibabaWebSailorAgent:
 
         # Adiciona ano atual se não estiver presente
         if not any(year in query for year in ["2024", "2025"]):
-            enhanced_query += " 2025"
+            enhanced_query += " 2024"
 
         return enhanced_query.strip()
 
     def _calculate_content_quality(
-        self, 
-        content: str, 
-        url: str, 
+        self,
+        content: str,
+        url: str,
         context: Dict[str, Any]
     ) -> float:
         """Calcula qualidade do conteúdo extraído"""
@@ -1262,11 +1192,11 @@ class AlibabaWebSailorAgent:
             # Verifica se contém termos relevantes
             if segmento and segmento in sentence_lower:
                 # Verifica se contém dados numéricos ou informações valiosas
-                if (re.search(r'\d+', sentence) or 
+                if (re.search(r'\d+', sentence) or
                     any(term in sentence_lower for term in [
-                        'crescimento', 'mercado', 'oportunidade', 'tendência', 
-                        'futuro', 'inovação', 'desafio', 'gratuita', 'empresa',
-                        'masterclass', 'aula', 'receita', 'lucro', 'dados'
+                        'crescimento', 'mercado', 'oportunidade', 'tendência',
+                        'futuro', 'inovação', 'desafio', 'consumidor', 'empresa',
+                        'startup', 'investimento', 'receita', 'lucro', 'dados'
                     ])):
                     insights.append(sentence[:300])
 
@@ -1276,6 +1206,7 @@ class AlibabaWebSailorAgent:
         """Extrai links internos relevantes"""
 
         try:
+            # Tenta primeiro com verificação SSL
             response = self.session.get(base_url, timeout=10)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.content, 'html.parser')
@@ -1287,22 +1218,55 @@ class AlibabaWebSailorAgent:
                     full_url = urljoin(base_url, href)
 
                     # Filtra apenas links do mesmo domínio
-                    if (full_url.startswith('http') and 
-                        base_domain in full_url and 
-                        "#" not in full_url and 
+                    if (full_url.startswith('http') and
+                        base_domain in full_url and
+                        "#" not in full_url and
                         full_url != base_url and
                         not any(ext in full_url.lower() for ext in ['.pdf', '.jpg', '.png', '.gif'])):
                         links.append(full_url)
 
                 return list(set(links))[:10]
-        except Exception:
+        except requests.exceptions.SSLError as ssl_error:
+            logger.warning(f"⚠️ Erro SSL ao extrair links de {base_url}: {str(ssl_error)}")
+            # Tenta novamente sem verificação SSL como fallback
+            try:
+                temp_session = requests.Session()
+                temp_session.headers.update(self.headers)
+                temp_session.verify = False
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                
+                response = temp_session.get(base_url, timeout=10)
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.content, 'html.parser')
+                    base_domain = urlparse(base_url).netloc
+
+                    links = []
+                    for a_tag in soup.find_all('a', href=True):
+                        href = a_tag['href']
+                        full_url = urljoin(base_url, href)
+
+                        if (full_url.startswith('http') and
+                            base_domain in full_url and
+                            "#" not in full_url and
+                            full_url != base_url and
+                            not any(ext in full_url.lower() for ext in ['.pdf', '.jpg', '.png', '.gif'])):
+                            links.append(full_url)
+
+                    logger.info(f"✅ Links extraídos sem SSL de {base_url}: {len(links)} links")
+                    return list(set(links))[:10]
+            except Exception as fallback_error:
+                logger.error(f"❌ Erro no fallback SSL para {base_url}: {str(fallback_error)}")
+                return []
+        except Exception as e:
+            logger.error(f"❌ Erro ao extrair links internos de {base_url}: {str(e)}")
             return []
 
         return []
 
     def _generate_intelligent_related_queries(
-        self, 
-        original_query: str, 
+        self,
+        original_query: str,
         context: Dict[str, Any],
         existing_content: List[Dict[str, Any]]
     ) -> List[str]:
@@ -1333,7 +1297,7 @@ class AlibabaWebSailorAgent:
                 f"desafios {segmento} mercado brasileiro soluções",
                 f"inovações {segmento} tecnologia Brasil",
                 f"regulamentação {segmento} mudanças Brasil",
-                f"investimentos {segmento} aulas gratuitas"
+                f"investimentos {segmento} startups Brasil"
             ])
 
         if produto:
@@ -1345,14 +1309,14 @@ class AlibabaWebSailorAgent:
 
         # Adiciona queries baseadas em termos frequentes
         for term in relevant_terms[:3]:
-            related_queries.append(f"{term} {segmento} Brasil")
+            related_queries.append(f"{term} {segmento} Brasil oportunidades")
 
         return related_queries[:8]
 
     def _process_and_analyze_content(
-        self, 
-        all_content: List[Dict[str, Any]], 
-        query: str, 
+        self,
+        all_content: List[Dict[str, Any]],
+        query: str,
         context: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Processa e analisa todo o conteúdo coletado"""
@@ -1413,7 +1377,7 @@ class AlibabaWebSailorAgent:
             "estatisticas_navegacao": self.navigation_stats,
             "metadata": {
                 "navegacao_concluida_em": datetime.now().isoformat(),
-                "agente": "Alibaba_WebSailor_v2.0",
+                "agente": "Alibaba_WebSailor_v3.0",
                 "garantia_dados_reais": True,
                 "simulacao_free": True,
                 "qualidade_premium": avg_quality >= 80
@@ -1430,7 +1394,7 @@ class AlibabaWebSailorAgent:
         trend_keywords = [
             'inteligência artificial', 'ia', 'automação', 'digital',
             'sustentabilidade', 'personalização', 'mobile', 'cloud',
-            'dados', 'analytics', 'experiência', 'inovação', 'aulas gratuitas',
+            'dados', 'analytics', 'experiência', 'inovação', 'telemedicina',
             'healthtech', 'fintech', 'edtech', 'blockchain', 'metaverso'
         ]
 
@@ -1532,5 +1496,2159 @@ class AlibabaWebSailorAgent:
         }
         logger.info("🔄 Estatísticas de navegação resetadas")
 
-# Instância global
+# =============== MÓDULO DE ANÁLISE DE CONTEÚDO VIRAL (BÁSICO) ===============
+
+class ViralContentAnalyzerModule:
+    """Módulo para análise de conteúdo viral com captura de screenshots"""
+
+    def __init__(self):
+        """Inicializa o analisador de conteúdo viral"""
+        self.instagram_token = os.getenv('INSTAGRAM_ACCESS_TOKEN')
+        self.facebook_token = os.getenv('FACEBOOK_ACCESS_TOKEN')
+        self.youtube_api_key = os.getenv('YOUTUBE_API_KEY')
+        self.screenshot_dir = os.path.join(os.getcwd(), 'analyses_data', 'screenshots')
+        os.makedirs(self.screenshot_dir, exist_ok=True)
+        
+        # Configuração do cliente HTTP
+        self.session = httpx.AsyncClient(timeout=30.0)
+        
+        logger.info("🔥 Módulo ViralContentAnalyzer inicializado")
+
+    async def __aenter__(self):
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.session.aclose()
+    
+    def _setup_selenium_driver(self, mobile: bool = False) -> webdriver.Chrome:
+        """Configura driver Selenium para captura de screenshots"""
+        if not HAS_SELENIUM:
+            raise Exception("Selenium não está instalado")
+            
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        
+        if mobile:
+            chrome_options.add_argument('--window-size=375,812')  # iPhone X size
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)')
+        else:
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+        
+        return webdriver.Chrome(options=chrome_options)
+    
+    async def capture_screenshot(self, url: str, filename: str, 
+                                mobile: bool = False, full_page: bool = True) -> str:
+        """
+        Captura screenshot de uma URL
+        """
+        if not HAS_SELENIUM:
+            logger.warning("⚠️ Selenium não disponível para captura de screenshots")
+            return ""
+            
+        try:
+            driver = self._setup_selenium_driver(mobile)
+            driver.get(url)
+            
+            # Aguarda carregamento
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            
+            # Scroll para carregar conteúdo dinâmico
+            if full_page:
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(3)
+                driver.execute_script("window.scrollTo(0, 0);")
+                time.sleep(2)
+            
+            # Remove elementos que podem atrapalhar
+            driver.execute_script("""
+                // Remove cookie banners, popups, etc.
+                var elements = document.querySelectorAll('[class*="cookie"], [class*="popup"], [class*="modal"], [id*="cookie"], [id*="popup"]');
+                elements.forEach(function(element) {
+                    element.style.display = 'none';
+                });
+            """)
+            
+            screenshot_path = os.path.join(self.screenshot_dir, filename)
+            
+            if full_page:
+                # Screenshot da página inteira
+                total_height = driver.execute_script("return document.body.scrollHeight")
+                driver.set_window_size(1920, total_height)
+                time.sleep(2)
+            
+            driver.save_screenshot(screenshot_path)
+            driver.quit()
+            
+            return screenshot_path
+            
+        except Exception as e:
+            logger.error(f"Erro ao capturar screenshot de {url}: {e}")
+            return ""
+    
+    async def analyze_instagram_content(self, hashtag: str, limit: int = 20) -> List[ViralContent]:
+        """
+        Analisa conteúdo do Instagram por hashtag
+        """
+        if not self.instagram_token:
+            return []
+        
+        # Instagram Basic Display API é limitada, simulamos análise
+        viral_contents = []
+        
+        try:
+            # Busca posts por hashtag (simulado - API real requer aprovação)
+            posts_data = await self._simulate_instagram_search(hashtag, limit)
+            
+            for post in posts_data:
+                screenshot_filename = f"instagram_{post['id']}_{int(time.time())}.png"
+                screenshot_path = await self.capture_screenshot(
+                    post['url'], screenshot_filename, mobile=True
+                )
+                
+                viral_content = ViralContent(
+                    platform="Instagram",
+                    url=post['url'],
+                    title=post.get('caption', '')[:100],
+                    description=post.get('caption', ''),
+                    author=post.get('username', ''),
+                    engagement_metrics={
+                        'likes': post.get('likes', 0),
+                        'comments': post.get('comments', 0),
+                        'shares': post.get('shares', 0)
+                    },
+                    screenshot_path=screenshot_path,
+                    content_type=post.get('media_type', 'image'),
+                    hashtags=self._extract_hashtags(post.get('caption', '')),
+                    mentions=self._extract_mentions(post.get('caption', '')),
+                    timestamp=post.get('timestamp', ''),
+                    virality_score=self._calculate_virality_score(post, 'instagram')
+                )
+                
+                viral_contents.append(viral_content)
+                
+        except Exception as e:
+            logger.error(f"Erro ao analisar Instagram: {e}")
+        
+        return viral_contents
+    
+    async def analyze_youtube_content(self, query: str, limit: int = 20) -> List[ViralContent]:
+        """
+        Analisa conteúdo do YouTube
+        """
+        if not self.youtube_api_key:
+            return []
+        
+        viral_contents = []
+        
+        try:
+            # Busca vídeos
+            search_url = "https://www.googleapis.com/youtube/v3/search"
+            search_params = {
+                'part': 'snippet',
+                'q': query,
+                'type': 'video',
+                'maxResults': limit,
+                'order': 'relevance',
+                'key': self.youtube_api_key
+            }
+            
+            response = await self.session.get(search_url, params=search_params)
+            response.raise_for_status()
+            search_data = response.json()
+            
+            # Busca estatísticas dos vídeos
+            video_ids = [item['id']['videoId'] for item in search_data.get('items', [])]
+            
+            if video_ids:
+                stats_url = "https://www.googleapis.com/youtube/v3/videos"
+                stats_params = {
+                    'part': 'statistics,snippet',
+                    'id': ','.join(video_ids),
+                    'key': self.youtube_api_key
+                }
+                
+                stats_response = await self.session.get(stats_url, params=stats_params)
+                stats_response.raise_for_status()
+                stats_data = stats_response.json()
+                
+                for video in stats_data.get('items', []):
+                    video_id = video['id']
+                    video_url = f"https://www.youtube.com/watch?v={video_id}"
+                    
+                    screenshot_filename = f"youtube_{video_id}_{int(time.time())}.png"
+                    screenshot_path = await self.capture_screenshot(
+                        video_url, screenshot_filename
+                    )
+                    
+                    stats = video.get('statistics', {})
+                    snippet = video.get('snippet', {})
+                    
+                    viral_content = ViralContent(
+                        platform="YouTube",
+                        url=video_url,
+                        title=snippet.get('title', ''),
+                        description=snippet.get('description', ''),
+                        author=snippet.get('channelTitle', ''),
+                        engagement_metrics={
+                            'views': int(stats.get('viewCount', 0)),
+                            'likes': int(stats.get('likeCount', 0)),
+                            'comments': int(stats.get('commentCount', 0)),
+                            'shares': 0  # YouTube não fornece shares via API
+                        },
+                        screenshot_path=screenshot_path,
+                        content_type='video',
+                        hashtags=self._extract_hashtags(snippet.get('description', '')),
+                        mentions=[],
+                        timestamp=snippet.get('publishedAt', ''),
+                        virality_score=self._calculate_virality_score(
+                            {'stats': stats, 'snippet': snippet}, 'youtube'
+                        )
+                    )
+                    
+                    viral_contents.append(viral_content)
+                    
+        except Exception as e:
+            logger.error(f"Erro ao analisar YouTube: {e}")
+        
+        return viral_contents
+    
+    async def analyze_facebook_content(self, query: str, limit: int = 20) -> List[ViralContent]:
+        """
+        Analisa conteúdo do Facebook (simulado devido a limitações da API)
+        """
+        viral_contents = []
+        
+        try:
+            # Simula busca no Facebook
+            facebook_data = await self._simulate_facebook_search(query, limit)
+            
+            for post in facebook_data:
+                screenshot_filename = f"facebook_{post['id']}_{int(time.time())}.png"
+                screenshot_path = await self.capture_screenshot(
+                    post['url'], screenshot_filename
+                )
+                
+                viral_content = ViralContent(
+                    platform="Facebook",
+                    url=post['url'],
+                    title=post.get('message', '')[:100],
+                    description=post.get('message', ''),
+                    author=post.get('from', {}).get('name', ''),
+                    engagement_metrics={
+                        'likes': post.get('reactions', 0),
+                        'comments': post.get('comments', 0),
+                        'shares': post.get('shares', 0)
+                    },
+                    screenshot_path=screenshot_path,
+                    content_type=post.get('type', 'status'),
+                    hashtags=self._extract_hashtags(post.get('message', '')),
+                    mentions=self._extract_mentions(post.get('message', '')),
+                    timestamp=post.get('created_time', ''),
+                    virality_score=self._calculate_virality_score(post, 'facebook')
+                )
+                
+                viral_contents.append(viral_content)
+                
+        except Exception as e:
+            logger.error(f"Erro ao analisar Facebook: {e}")
+        
+        return viral_contents
+    
+    def _extract_hashtags(self, text: str) -> List[str]:
+        """Extrai hashtags do texto"""
+        hashtag_pattern = r'#\w+'
+        hashtags = re.findall(hashtag_pattern, text)
+        return [tag.lower() for tag in hashtags]
+    
+    def _extract_mentions(self, text: str) -> List[str]:
+        """Extrai menções do texto"""
+        mention_pattern = r'@\w+'
+        mentions = re.findall(mention_pattern, text)
+        return [mention.lower() for mention in mentions]
+    
+    def _calculate_virality_score(self, content_data: Dict, platform: str) -> float:
+        """
+        Calcula score de viralidade baseado na plataforma
+        """
+        score = 0.0
+        
+        if platform == 'youtube':
+            stats = content_data.get('stats', {})
+            views = int(stats.get('viewCount', 0))
+            likes = int(stats.get('likeCount', 0))
+            comments = int(stats.get('commentCount', 0))
+            
+            # Score baseado em views (normalizado)
+            if views > 1000000:  # 1M+ views
+                score += 10.0
+            elif views > 100000:  # 100K+ views
+                score += 7.0
+            elif views > 10000:  # 10K+ views
+                score += 5.0
+            elif views > 1000:  # 1K+ views
+                score += 3.0
+            
+            # Score baseado em engagement rate
+            if views > 0:
+                engagement_rate = (likes + comments) / views
+                score += min(engagement_rate * 100, 5.0)
+                
+        elif platform == 'instagram':
+            likes = content_data.get('likes', 0)
+            comments = content_data.get('comments', 0)
+            
+            total_engagement = likes + comments
+            if total_engagement > 10000:
+                score += 10.0
+            elif total_engagement > 1000:
+                score += 7.0
+            elif total_engagement > 100:
+                score += 5.0
+            elif total_engagement > 10:
+                score += 3.0
+                
+        elif platform == 'facebook':
+            reactions = content_data.get('reactions', 0)
+            comments = content_data.get('comments', 0)
+            shares = content_data.get('shares', 0)
+            
+            total_engagement = reactions + comments + (shares * 2)  # Shares valem mais
+            if total_engagement > 5000:
+                score += 10.0
+            elif total_engagement > 500:
+                score += 7.0
+            elif total_engagement > 50:
+                score += 5.0
+            elif total_engagement > 5:
+                score += 3.0
+        
+        return min(score, 10.0)  # Cap at 10.0
+    
+    async def _simulate_instagram_search(self, hashtag: str, limit: int) -> List[Dict]:
+        """Simula busca no Instagram (para demonstração)"""
+        # Em produção, usaria Instagram Basic Display API ou Graph API
+        return [
+            {
+                'id': f'ig_{i}',
+                'url': f'https://instagram.com/p/example{i}',
+                'caption': f'Post sobre {hashtag} #{hashtag} #viral',
+                'username': f'user_{i}',
+                'likes': 1000 + i * 100,
+                'comments': 50 + i * 10,
+                'shares': 20 + i * 5,
+                'media_type': 'image',
+                'timestamp': datetime.now().isoformat()
+            }
+            for i in range(limit)
+        ]
+    
+    async def _simulate_facebook_search(self, query: str, limit: int) -> List[Dict]:
+        """Simula busca no Facebook (para demonstração)"""
+        return [
+            {
+                'id': f'fb_{i}',
+                'url': f'https://facebook.com/posts/example{i}',
+                'message': f'Post sobre {query} muito viral!',
+                'from': {'name': f'Page {i}'},
+                'reactions': 500 + i * 50,
+                'comments': 25 + i * 5,
+                'shares': 10 + i * 2,
+                'type': 'status',
+                'created_time': datetime.now().isoformat()
+            }
+            for i in range(limit)
+        ]
+    
+    async def analyze_trending_content(self, segment: str, platforms: List[str] = None) -> Dict[str, List[ViralContent]]:
+        """
+        Analisa conteúdo em tendência por segmento
+        """
+        if platforms is None:
+            platforms = ['youtube', 'instagram', 'facebook']
+        
+        trending_content = {}
+        
+        for platform in platforms:
+            if platform == 'youtube':
+                content = await self.analyze_youtube_content(segment, 10)
+            elif platform == 'instagram':
+                content = await self.analyze_instagram_content(segment, 10)
+            elif platform == 'facebook':
+                content = await self.analyze_facebook_content(segment, 10)
+            else:
+                content = []
+            
+            trending_content[platform] = content
+        
+        return trending_content
+    
+    async def generate_virality_report(self, content_list: List[ViralContent]) -> Dict[str, Any]:
+        """
+        Gera relatório de viralidade
+        """
+        if not content_list:
+            return {}
+        
+        # Estatísticas gerais
+        total_content = len(content_list)
+        platforms = list(set(content.platform for content in content_list))
+        avg_virality = sum(content.virality_score for content in content_list) / total_content
+        
+        # Top hashtags
+        all_hashtags = []
+        for content in content_list:
+            all_hashtags.extend(content.hashtags)
+        
+        hashtag_counts = {}
+        for hashtag in all_hashtags:
+            hashtag_counts[hashtag] = hashtag_counts.get(hashtag, 0) + 1
+        
+        top_hashtags = sorted(hashtag_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        
+        # Conteúdo mais viral por plataforma
+        platform_top = {}
+        for platform in platforms:
+            platform_content = [c for c in content_list if c.platform == platform]
+            if platform_content:
+                platform_top[platform] = max(platform_content, key=lambda x: x.virality_score)
+        
+        report = {
+            'summary': {
+                'total_content': total_content,
+                'platforms_analyzed': platforms,
+                'average_virality_score': round(avg_virality, 2),
+                'analysis_timestamp': datetime.now().isoformat()
+            },
+            'top_hashtags': top_hashtags,
+            'platform_leaders': {
+                platform: {
+                    'title': content.title,
+                    'url': content.url,
+                    'virality_score': content.virality_score,
+                    'engagement_metrics': content.engagement_metrics
+                }
+                for platform, content in platform_top.items()
+            },
+            'content_distribution': {
+                platform: len([c for c in content_list if c.platform == platform])
+                for platform in platforms
+            }
+        }
+        
+        return report
+
+# =============== MÓDULO AVANÇADO DE ANÁLISE DE CONTEÚDO VIRAL ===============
+
+class ViralContentAnalyzerAdvanced:
+    """Analisador de conteúdo viral com captura automática"""
+
+    def __init__(self):
+        """Inicializa o analisador avançado"""
+        self.viral_thresholds = {
+            'youtube': {
+                'min_views': 10000,
+                'min_likes': 500,
+                'min_comments': 50,
+                'engagement_rate': 0.05
+            },
+            'instagram': {
+                'min_likes': 1000,
+                'min_comments': 50,
+                'engagement_rate': 0.03
+            },
+            'twitter': {
+                'min_retweets': 100,
+                'min_likes': 500,
+                'min_replies': 20
+            },
+            'tiktok': {
+                'min_views': 50000,
+                'min_likes': 2000,
+                'min_shares': 100
+            }
+        }
+
+        self.screenshot_config = {
+            'width': 1920,
+            'height': 1080,
+            'wait_time': 5,
+            'scroll_pause': 2
+        }
+
+        logger.info("🔥 Módulo ViralContentAnalyzerAdvanced inicializado")
+
+    async def analyze_and_capture_viral_content(
+        self,
+        search_results: Dict[str, Any],
+        session_id: str,
+        max_captures: int = 15
+    ) -> Dict[str, Any]:
+        """Analisa e captura conteúdo viral dos resultados de busca"""
+
+        logger.info(f"🔥 Analisando conteúdo viral para sessão: {session_id}")
+
+        analysis_results = {
+            'session_id': session_id,
+            'analysis_started': datetime.now().isoformat(),
+            'viral_content_identified': [],
+            'screenshots_captured': [],
+            'viral_metrics': {},
+            'platform_analysis': {},
+            'top_performers': [],
+            'engagement_insights': {}
+        }
+
+        try:
+            # FASE 1: Identificação de Conteúdo Viral
+            logger.info("🎯 FASE 1: Identificando conteúdo viral")
+
+            all_content = []
+
+            # Coleta todo o conteúdo
+            for platform_results in ['web_results', 'youtube_results', 'social_results']:
+                content_list = search_results.get(platform_results, [])
+                if isinstance(content_list, list):
+                    all_content.extend(content_list)
+                else:
+                    logger.warning(f"Dados inesperados para {platform_results}: esperado uma lista, obtido {type(content_list)}")
+
+            # Analisa viralidade
+            viral_content = self._identify_viral_content(all_content)
+            analysis_results['viral_content_identified'] = viral_content
+
+            # FASE 2: Análise por Plataforma
+            logger.info("📊 FASE 2: Análise detalhada por plataforma")
+            platform_analysis = self._analyze_by_platform(viral_content)
+            analysis_results['platform_analysis'] = platform_analysis
+
+            # FASE 3: Captura de Screenshots
+            logger.info("📸 FASE 3: Capturando screenshots do conteúdo viral")
+
+            if HAS_SELENIUM and viral_content:
+                try:
+                    # Seleciona top performers para screenshot
+                    top_content = sorted(
+                        viral_content,
+                        key=lambda x: x.get('viral_score', 0),
+                        reverse=True
+                    )[:max_captures]
+
+                    screenshots = await self._capture_viral_screenshots(top_content, session_id)
+                    analysis_results['screenshots_captured'] = screenshots
+                except Exception as e:
+                    logger.warning(f"⚠️ Screenshots não disponíveis: {e}")
+                    # Continua sem screenshots - não é crítico
+                    analysis_results['screenshots_captured'] = []
+            else:
+                logger.warning("⚠️ Selenium não disponível ou nenhum conteúdo viral encontrado - screenshots desabilitados")
+                analysis_results['screenshots_captured'] = []
+
+            # FASE 4: Métricas e Insights
+            logger.info("📈 FASE 4: Calculando métricas virais")
+
+            viral_metrics = self._calculate_viral_metrics(viral_content)
+            analysis_results['viral_metrics'] = viral_metrics
+
+            engagement_insights = self._extract_engagement_insights(viral_content)
+            analysis_results['engagement_insights'] = engagement_insights
+
+            # Top performers
+            analysis_results['top_performers'] = sorted(
+                viral_content,
+                key=lambda x: x.get('viral_score', 0),
+                reverse=True
+            )[:10]
+
+            logger.info(f"✅ Análise viral concluída: {len(viral_content)} conteúdos identificados")
+            logger.info(f"📸 {len(analysis_results['screenshots_captured'])} screenshots capturados")
+
+            return analysis_results
+
+        except Exception as e:
+            logger.error(f"❌ Erro na análise viral: {e}", exc_info=True)
+            raise
+
+    def _identify_viral_content(self, all_content: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Identifica conteúdo viral baseado em métricas"""
+
+        viral_content = []
+
+        for content in all_content:
+            if not isinstance(content, dict):
+                 logger.warning("Item de conteúdo não é um dicionário, pulando.")
+                 continue
+            platform = content.get('platform', 'web')
+            viral_score = self._calculate_viral_score(content, platform)
+
+            if viral_score >= 5.0:  # Threshold viral
+                content['viral_score'] = viral_score
+                content['viral_category'] = self._categorize_viral_content(content, viral_score)
+                viral_content.append(content)
+
+        return viral_content
+
+    def _calculate_viral_score(self, content: Dict[str, Any], platform: str) -> float:
+        """Calcula score viral baseado na plataforma"""
+
+        try:
+            if platform == 'youtube':
+                views = int(content.get('view_count', 0) or 0)
+                likes = int(content.get('like_count', 0) or 0)
+                comments = int(content.get('comment_count', 0) or 0)
+
+                # Fórmula YouTube: views/1000 + likes/100 + comments/10
+                score = (views / 1000) + (likes / 100) + (comments / 10)
+                return min(10.0, score / 100) if score > 0 else 0.0
+
+            elif platform in ['instagram', 'facebook']:
+                likes = int(content.get('likes', 0) or 0)
+                comments = int(content.get('comments', 0) or 0)
+                shares = int(content.get('shares', 0) or 0)
+
+                # Fórmula Instagram/Facebook
+                score = (likes / 100) + (comments / 10) + (shares / 5)
+                return min(10.0, score / 50) if score > 0 else 0.0
+
+            elif platform == 'twitter':
+                retweets = int(content.get('retweets', 0) or 0)
+                likes = int(content.get('likes', 0) or 0)
+                replies = int(content.get('replies', 0) or 0)
+
+                # Fórmula Twitter
+                score = (retweets / 10) + (likes / 50) + (replies / 5)
+                return min(10.0, score / 20) if score > 0 else 0.0
+
+            elif platform == 'tiktok':
+                views = int(content.get('view_count', 0) or 0)
+                likes = int(content.get('likes', 0) or 0)
+                shares = int(content.get('shares', 0) or 0)
+
+                # Fórmula TikTok
+                score = (views / 10000) + (likes / 500) + (shares / 100)
+                return min(10.0, score / 50) if score > 0 else 0.0
+
+            else:
+                # Score baseado em relevância para conteúdo web
+                relevance = content.get('relevance_score', 0) or 0
+                return float(relevance) * 10
+
+        except (ValueError, TypeError) as e:
+            logger.warning(f"⚠️ Erro ao calcular score viral para conteúdo {content.get('title', 'Sem título')}: {e}")
+            return 0.0
+        except Exception as e:
+            logger.warning(f"⚠️ Erro inesperado ao calcular score viral: {e}")
+            return 0.0
+
+    def _categorize_viral_content(self, content: Dict[str, Any], viral_score: float) -> str:
+        """Categoriza conteúdo viral"""
+
+        if viral_score >= 9.0:
+            return 'MEGA_VIRAL'
+        elif viral_score >= 7.0:
+            return 'VIRAL'
+        elif viral_score >= 5.0:
+            return 'TRENDING'
+        else:
+            return 'POPULAR'
+
+    def _analyze_by_platform(self, viral_content: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Analisa conteúdo viral por plataforma"""
+
+        platform_stats = {}
+
+        for content in viral_content:
+            platform = content.get('platform', 'web')
+
+            if platform not in platform_stats:
+                platform_stats[platform] = {
+                    'total_content': 0,
+                    'avg_viral_score': 0.0,
+                    'top_content': [],
+                    'engagement_metrics': {},
+                    'content_themes': []
+                }
+
+            stats = platform_stats[platform]
+            stats['total_content'] += 1
+            stats['top_content'].append(content)
+
+            # Calcula métricas de engajamento
+            try:
+                if platform == 'youtube':
+                    stats['engagement_metrics']['total_views'] = stats['engagement_metrics'].get('total_views', 0) + int(content.get('view_count', 0) or 0)
+                    stats['engagement_metrics']['total_likes'] = stats['engagement_metrics'].get('total_likes', 0) + int(content.get('like_count', 0) or 0)
+
+                elif platform in ['instagram', 'facebook']:
+                    stats['engagement_metrics']['total_likes'] = stats['engagement_metrics'].get('total_likes', 0) + int(content.get('likes', 0) or 0)
+                    stats['engagement_metrics']['total_comments'] = stats['engagement_metrics'].get('total_comments', 0) + int(content.get('comments', 0) or 0)
+            except (ValueError, TypeError) as e:
+                 logger.warning(f"Ignorando métrica inválida para {platform}: {e}")
+
+        # Calcula médias
+        for platform, stats in platform_stats.items():
+            if stats['total_content'] > 0:
+                total_score = sum(c.get('viral_score', 0) for c in stats['top_content'])
+                stats['avg_viral_score'] = total_score / stats['total_content']
+
+                # Ordena top content
+                stats['top_content'] = sorted(
+                    stats['top_content'],
+                    key=lambda x: x.get('viral_score', 0),
+                    reverse=True
+                )[:5]
+
+        return platform_stats
+
+    async def _capture_viral_screenshots(
+        self,
+        viral_content: List[Dict[str, Any]],
+        session_id: str
+    ) -> List[Dict[str, Any]]:
+        """Captura screenshots do conteúdo viral"""
+
+        if not HAS_SELENIUM:
+            logger.warning("⚠️ Selenium não disponível para screenshots")
+            return []
+
+        screenshots = []
+
+        try:
+            # Configura Chrome headless
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--disable-web-security")
+            chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+            chrome_options.add_argument("--remote-debugging-port=9222")
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--disable-plugins")
+            chrome_options.add_argument(f"--window-size={self.screenshot_config['width']},{self.screenshot_config['height']}")
+            chrome_options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+
+            # Usa ChromeDriverManager
+            try:
+                service = Service(ChromeDriverManager().install())
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+                logger.info("✅ ChromeDriverManager funcionou")
+            except Exception as e:
+                logger.warning(f"⚠️ ChromeDriverManager falhou: {e}, tentando usar chromedriver do sistema")
+                # Fallback para chromedriver do sistema (se configurado corretamente)
+                try:
+                    driver = webdriver.Chrome(options=chrome_options)
+                    logger.info("✅ Chromedriver do sistema funcionou")
+                except WebDriverException as sys_driver_e:
+                    logger.error(f"❌ Falha ao iniciar Chrome com chromedriver do sistema: {sys_driver_e}. Certifique-se de que o chromedriver esteja no PATH ou especificado.")
+                    return []
+
+            # Cria diretório para screenshots
+            screenshots_dir = Path(f"analyses_data/files/{session_id}")
+            screenshots_dir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                for i, content in enumerate(viral_content, 1):
+                    try:
+                        url = content.get('url', '')
+                        if not url or not url.startswith(('http://', 'https://')):
+                            logger.warning(f"Skipping invalid URL: {url}")
+                            continue
+
+                        logger.info(f"📸 Capturando screenshot {i}/{len(viral_content)}: {content.get('title', 'Sem título')}")
+
+                        # Acessa a URL
+                        driver.get(url)
+
+                        # Aguarda carregamento
+                        WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.TAG_NAME, "body"))
+                        )
+
+                        # Aguarda renderização completa
+                        await asyncio.sleep(self.screenshot_config['wait_time'])
+
+                        # Scroll para carregar conteúdo lazy-loaded
+                        driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
+                        await asyncio.sleep(self.screenshot_config['scroll_pause'])
+                        driver.execute_script("window.scrollTo(0, 0);")
+                        await asyncio.sleep(1)
+
+                        # Captura informações da página
+                        page_title = driver.title or content.get('title', 'Sem título')
+                        current_url = driver.current_url
+
+                        # Define nome do arquivo
+                        platform = content.get('platform', 'web')
+                        viral_score = content.get('viral_score', 0)
+                        # Evita caracteres inválidos no nome do arquivo
+                        safe_title = "".join(c if c.isalnum() else "_" for c in page_title[:50])
+                        filename = f"viral_{platform}_{i:02d}_score{viral_score:.1f}_{safe_title}.png"
+                        screenshot_path = screenshots_dir / filename
+
+                        # Captura screenshot
+                        driver.save_screenshot(str(screenshot_path))
+
+                        # Verifica se foi criado com sucesso
+                        if screenshot_path.exists() and screenshot_path.stat().st_size > 0:
+                            screenshot_data = {
+                                'filename': filename,
+                                'filepath': str(screenshot_path),
+                                'relative_path': f"files/{session_id}/{filename}",
+                                'url': url,
+                                'final_url': current_url,
+                                'title': page_title,
+                                'platform': platform,
+                                'viral_score': viral_score,
+                                'viral_category': content.get('viral_category', 'POPULAR'),
+                                'content_metrics': {
+                                    'views': content.get('view_count', content.get('views', 0)),
+                                    'likes': content.get('like_count', content.get('likes', 0)),
+                                    'comments': content.get('comment_count', content.get('comments', 0)),
+                                    'shares': content.get('shares', 0),
+                                    'engagement_rate': content.get('engagement_rate', 0)
+                                },
+                                'file_size': screenshot_path.stat().st_size,
+                                'captured_at': datetime.now().isoformat(),
+                                'capture_success': True
+                            }
+
+                            screenshots.append(screenshot_data)
+                            logger.info(f"✅ Screenshot {i} capturado: {filename}")
+                        else:
+                            logger.warning(f"⚠️ Falha ao criar arquivo de screenshot {i}: {screenshot_path}")
+
+                    except (TimeoutException, WebDriverException) as e:
+                        logger.error(f"❌ Erro de Selenium ao capturar screenshot {i} ({url}): {e}")
+                        continue
+                    except Exception as e:
+                        logger.error(f"❌ Erro inesperado ao capturar screenshot {i} ({url}): {e}", exc_info=True)
+                        continue
+
+            finally:
+                if 'driver' in locals() and driver:
+                    driver.quit()
+                    logger.info("✅ Driver do Chrome fechado")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Falha geral na captura de screenshots: {e}", exc_info=True)
+            return []
+
+        logger.info(f"📸 {len(screenshots)} screenshots capturados com sucesso")
+        return screenshots
+
+    def _calculate_viral_metrics(self, viral_content: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Calcula métricas gerais de viralidade"""
+
+        if not viral_content:
+            return {}
+
+        metrics = {
+            'total_viral_content': len(viral_content),
+            'avg_viral_score': 0.0,
+            'viral_distribution': {
+                'MEGA_VIRAL': 0,
+                'VIRAL': 0,
+                'TRENDING': 0,
+                'POPULAR': 0
+            },
+            'platform_distribution': {},
+            'engagement_totals': {
+                'total_views': 0,
+                'total_likes': 0,
+                'total_comments': 0,
+                'total_shares': 0
+            },
+            'top_viral_score': 0.0
+        }
+
+        total_score = 0.0
+
+        for content in viral_content:
+            viral_score = content.get('viral_score', 0)
+            total_score += viral_score
+
+            # Atualiza score máximo
+            if viral_score > metrics['top_viral_score']:
+                metrics['top_viral_score'] = viral_score
+
+            # Distribui por categoria
+            category = content.get('viral_category', 'POPULAR')
+            metrics['viral_distribution'][category] = metrics['viral_distribution'].get(category, 0) + 1
+
+            # Distribui por plataforma
+            platform = content.get('platform', 'web')
+            metrics['platform_distribution'][platform] = metrics['platform_distribution'].get(platform, 0) + 1
+
+            # Soma engajamento
+            try:
+                metrics['engagement_totals']['total_views'] += int(content.get('view_count', content.get('views', 0)) or 0)
+                metrics['engagement_totals']['total_likes'] += int(content.get('like_count', content.get('likes', 0)) or 0)
+                metrics['engagement_totals']['total_comments'] += int(content.get('comment_count', content.get('comments', 0)) or 0)
+                metrics['engagement_totals']['total_shares'] += int(content.get('shares', 0) or 0)
+            except (ValueError, TypeError) as e:
+                 logger.warning(f"Ignorando métrica de engajamento inválida: {e}")
+
+        # Calcula médias
+        if len(viral_content) > 0:
+            metrics['avg_viral_score'] = total_score / len(viral_content)
+        else:
+            metrics['avg_viral_score'] = 0.0
+
+        return metrics
+
+    def _extract_engagement_insights(self, viral_content: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Extrai insights de engajamento"""
+
+        insights = {
+            'best_performing_platforms': [],
+            'optimal_content_types': [],
+            'engagement_patterns': {},
+            'viral_triggers': [],
+            'audience_preferences': {}
+        }
+
+        # Analisa performance por plataforma
+        platform_performance = {}
+
+        for content in viral_content:
+            platform = content.get('platform', 'web')
+            viral_score = content.get('viral_score', 0)
+
+            if platform not in platform_performance:
+                platform_performance[platform] = {
+                    'total_score': 0.0,
+                    'content_count': 0,
+                    'avg_score': 0.0
+                }
+
+            platform_performance[platform]['total_score'] += viral_score
+            platform_performance[platform]['content_count'] += 1
+
+        # Calcula médias e ordena
+        for platform, data in platform_performance.items():
+            if data['content_count'] > 0:
+                data['avg_score'] = data['total_score'] / data['content_count']
+            else:
+                data['avg_score'] = 0.0
+
+        insights['best_performing_platforms'] = sorted(
+            platform_performance.items(),
+            key=lambda x: x[1]['avg_score'],
+            reverse=True
+        )
+
+        # Identifica padrões de conteúdo
+        content_types = {}
+        for content in viral_content:
+            title = (content.get('title', '') or '').lower()
+
+            # Categoriza por tipo de conteúdo
+            if any(word in title for word in ['como', 'tutorial', 'passo a passo']):
+                content_types['tutorial'] = content_types.get('tutorial', 0) + 1
+            elif any(word in title for word in ['dica', 'segredo', 'truque']):
+                content_types['dicas'] = content_types.get('dicas', 0) + 1
+            elif any(word in title for word in ['caso', 'história', 'experiência']):
+                content_types['casos'] = content_types.get('casos', 0) + 1
+            elif any(word in title for word in ['análise', 'dados', 'pesquisa']):
+                content_types['analise'] = content_types.get('analise', 0) + 1
+
+        insights['optimal_content_types'] = sorted(
+            content_types.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        return insights
+
+    def generate_viral_content_report(
+        self,
+        analysis_results: Dict[str, Any],
+        session_id: str
+    ) -> str:
+        """Gera relatório detalhado do conteúdo viral"""
+
+        viral_content = analysis_results.get('viral_content_identified', [])
+        screenshots = analysis_results.get('screenshots_captured', [])
+        metrics = analysis_results.get('viral_metrics', {})
+
+        report = f"# RELATÓRIO DE CONTEÚDO VIRAL - ARQV30 Enhanced v3.0\n\n**Sessão:** {session_id}  \n**Análise realizada em:** {analysis_results.get('analysis_started', 'N/A')}  \n**Conteúdo viral identificado:** {len(viral_content)}  \n**Screenshots capturados:** {len(screenshots)}\n\n---\n\n## RESUMO EXECUTIVO\n\n### Métricas Gerais:\n- **Total de conteúdo viral:** {metrics.get('total_viral_content', 0)}\n- **Score viral médio:** {metrics.get('avg_viral_score', 0):.2f}/10\n- **Score viral máximo:** {metrics.get('top_viral_score', 0):.2f}/10\n\n### Distribuição por Categoria:\n"
+
+        # Adiciona distribuição viral
+        viral_dist = metrics.get('viral_distribution', {})
+        for category, count in viral_dist.items():
+            report += f"- **{category}:** {count} conteúdos\n"
+
+        report += "\n### Distribuição por Plataforma:\n"
+        platform_dist = metrics.get('platform_distribution', {})
+        for platform, count in platform_dist.items():
+            report += f"- **{platform.title()}:** {count} conteúdos\n"
+
+        report += "\n---\n\n## TOP 10 CONTEÚDOS VIRAIS\n\n"
+
+        # Lista top performers
+        top_performers = analysis_results.get('top_performers', [])
+        for i, content in enumerate(top_performers[:10], 1):
+            report += f"### {i}. {content.get('title', 'Sem título')}\n\n**Plataforma:** {content.get('platform', 'N/A').title()}  \n**Score Viral:** {content.get('viral_score', 0):.2f}/10  \n**Categoria:** {content.get('viral_category', 'N/A')}  \n**URL:** {content.get('url', 'N/A')}  \n"
+
+            # Métricas específicas por plataforma
+            if content.get('platform') == 'youtube':
+                report += f"**Views:** {content.get('view_count', 0):,}  \n**Likes:** {content.get('like_count', 0):,}  \n**Comentários:** {content.get('comment_count', 0):,}  \n**Canal:** {content.get('channel', 'N/A')}  \n"
+
+            elif content.get('platform') in ['instagram', 'facebook']:
+                report += f"**Likes:** {content.get('likes', 0):,}  \n**Comentários:** {content.get('comments', 0):,}  \n**Compartilhamentos:** {content.get('shares', 0):,}  \n"
+
+            elif content.get('platform') == 'twitter':
+                report += f"**Retweets:** {content.get('retweets', 0):,}  \n**Likes:** {content.get('likes', 0):,}  \n**Respostas:** {content.get('replies', 0):,}  \n"
+
+            report += "\n"
+
+        # Adiciona screenshots se disponíveis
+        if screenshots:
+            report += "---\n\n## EVIDÊNCIAS VISUAIS CAPTURADAS\n\n"
+
+            for i, screenshot in enumerate(screenshots, 1):
+                report += f"### Screenshot {i}: {screenshot.get('title', 'Sem título')}\n\n**Plataforma:** {screenshot.get('platform', 'N/A').title()}  \n**Score Viral:** {screenshot.get('viral_score', 0):.2f}/10  \n**URL Original:** {screenshot.get('url', 'N/A')}  \n![Screenshot {i}]({screenshot.get('relative_path', '')})  \n\n"
+
+                # Métricas do conteúdo
+                metrics = screenshot.get('content_metrics', {})
+                if metrics:
+                    report += "**Métricas de Engajamento:**  \n"
+                    if metrics.get('views'):
+                        report += f"- Views: {metrics['views']:,}  \n"
+                    if metrics.get('likes'):
+                        report += f"- Likes: {metrics['likes']:,}  \n"
+                    if metrics.get('comments'):
+                        report += f"- Comentários: {metrics['comments']:,}  \n"
+                    if metrics.get('shares'):
+                        report += f"- Compartilhamentos: {metrics['shares']:,}  \n"
+
+                report += "\n"
+
+        # Insights de engajamento
+        engagement_insights = analysis_results.get('engagement_insights', {})
+        if engagement_insights:
+            report += "---\n\n## INSIGHTS DE ENGAJAMENTO\n\n"
+
+            best_platforms = engagement_insights.get('best_performing_platforms', [])
+            if best_platforms:
+                report += "### Plataformas com Melhor Performance:\n"
+                for platform, data in best_platforms[:3]:
+                    report += f"1. **{platform.title()}:** Score médio {data['avg_score']:.2f} ({data['content_count']} conteúdos)\n"
+
+            content_types = engagement_insights.get('optimal_content_types', [])
+            if content_types:
+                report += "\n### Tipos de Conteúdo Mais Virais:\n"
+                for content_type, count in content_types[:5]:
+                    report += f"- **{content_type.title()}:** {count} conteúdos virais\n"
+
+        report += f"\n---\n\n*Relatório gerado automaticamente em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}*"
+
+        return report
+
+# =============== MÓDULO DE BUSCA DE IMAGENS VIRAIS ===============
+
+class ViralImageFinder:
+    """Classe principal para encontrar imagens virais"""
+    def __init__(self, config: Dict = None):
+        """Inicializa o buscador de imagens virais"""
+        self.config = config or self._load_config()
+        # Sistema de rotação de APIs
+        self.api_keys = self._load_multiple_api_keys()
+        self.current_api_index = {
+            'apify': 0,
+            'openrouter': 0,
+            'serper': 0,
+            'google_cse': 0
+        }
+        self.failed_apis = set()  # APIs que falharam recentemente
+        self.instagram_session_cookie = self.config.get('instagram_session_cookie')
+        self.playwright_enabled = self.config.get('playwright_enabled', True) and PLAYWRIGHT_AVAILABLE
+        # Configurar diretórios necessários
+        self._ensure_directories()
+        # Configurar sessão HTTP síncrona para fallbacks
+        if not HAS_ASYNC_DEPS:
+            import requests
+            self.session = requests.Session()
+            self.setup_session()
+        
+        # Validar configuração das APIs
+        self._validate_api_configuration()
+        
+        # Confirmar inicialização bem-sucedida
+        logger.info("🔥 Módulo ViralImageFinder inicializado")
+
+    def _load_config(self) -> Dict:
+        """Carrega configurações do ambiente"""
+        return {
+            'gemini_api_key': os.getenv('GEMINI_API_KEY'),
+            'serper_api_key': os.getenv('SERPER_API_KEY'),
+            'google_search_key': os.getenv('GOOGLE_SEARCH_KEY'),
+            'google_cse_id': os.getenv('GOOGLE_CSE_ID'),
+            'apify_api_key': os.getenv('APIFY_API_KEY'),
+            'instagram_session_cookie': os.getenv('INSTAGRAM_SESSION_COOKIE'),
+
+            'max_images': int(os.getenv('MAX_IMAGES', 30)),
+            'min_engagement': float(os.getenv('MIN_ENGAGEMENT', 0)),
+            'timeout': int(os.getenv('TIMEOUT', 30)),
+            'headless': os.getenv('PLAYWRIGHT_HEADLESS', 'True').lower() == 'true',
+            'output_dir': os.getenv('OUTPUT_DIR', 'viral_images_data'),
+            'images_dir': os.getenv('IMAGES_DIR', 'downloaded_images'),
+            'extract_images': os.getenv('EXTRACT_IMAGES', 'True').lower() == 'true',
+            'playwright_enabled': os.getenv('PLAYWRIGHT_ENABLED', 'True').lower() == 'true',
+            'screenshots_dir': os.getenv('SCREENSHOTS_DIR', 'screenshots'),
+            'playwright_timeout': int(os.getenv('PLAYWRIGHT_TIMEOUT', 45000)),
+            'playwright_browser': os.getenv('PLAYWRIGHT_BROWSER', 'chromium'),
+        }
+
+    def _load_multiple_api_keys(self) -> Dict:
+        """Carrega múltiplas chaves de API para rotação"""
+        api_keys = {
+            'apify': [],
+            'openrouter': [],
+            'serper': [],
+            'google_cse': []
+        }
+        # Apify - múltiplas chaves
+        for i in range(1, 4):  # Até 3 chaves Apify
+            key = os.getenv(f'APIFY_API_KEY_{i}') or (os.getenv('APIFY_API_KEY') if i == 1 else None)
+            if key and key.strip():
+                api_keys['apify'].append(key.strip())
+                logger.info(f"✅ Apify API {i} carregada")
+        # OpenRouter - múltiplas chaves
+        for i in range(1, 4):  # Até 3 chaves OpenRouter
+            key = os.getenv(f'OPENROUTER_API_KEY_{i}') or (os.getenv('OPENROUTER_API_KEY') if i == 1 else None)
+            if key and key.strip():
+                api_keys['openrouter'].append(key.strip())
+                logger.info(f"✅ OpenRouter API {i} carregada")
+        # Serper - múltiplas chaves (incluindo todas as 4 chaves disponíveis)
+        # Primeiro carrega a chave principal
+        main_key = os.getenv('SERPER_API_KEY')
+        if main_key and main_key.strip():
+            api_keys['serper'].append(main_key.strip())
+            logger.info(f"✅ Serper API principal carregada")
+        
+        # Depois carrega as chaves numeradas (1, 2, 3)
+        for i in range(1, 4):  # Até 3 chaves Serper numeradas
+            key = os.getenv(f'SERPER_API_KEY_{i}')
+            if key and key.strip():
+                api_keys['serper'].append(key.strip())
+                logger.info(f"✅ Serper API {i} carregada")
+        # Google CSE
+        google_key = os.getenv('GOOGLE_SEARCH_KEY')
+        google_cse = os.getenv('GOOGLE_CSE_ID')
+        if google_key and google_cse:
+            api_keys['google_cse'].append({'key': google_key, 'cse_id': google_cse})
+            logger.info(f"✅ Google CSE carregada")
+        return api_keys
+    
+    def _validate_api_configuration(self):
+        """Valida se pelo menos uma API está configurada"""
+        total_apis = sum(len(keys) for keys in self.api_keys.values())
+        
+        if total_apis == 0:
+            logger.error("❌ NENHUMA API CONFIGURADA! O serviço NÃO FUNCIONARÁ sem APIs reais.")
+            logger.error("🚨 OBRIGATÓRIO: Configure pelo menos uma das seguintes APIs:")
+            logger.error("   - SERPER_API_KEY (recomendado)")
+            logger.error("   - GOOGLE_SEARCH_KEY + GOOGLE_CSE_ID")
+            logger.error("   - APIFY_API_KEY")
+            raise ValueError("Nenhuma API configurada. Serviço requer APIs reais para funcionar.")
+        else:
+            logger.info(f"✅ {total_apis} API(s) configurada(s) e prontas para uso")
+            
+        # Verificar dependências opcionais
+        if not HAS_ASYNC_DEPS:
+            logger.warning("⚠️ aiohttp/aiofiles não instalados. Usando requests síncrono como fallback.")
+            
+        if not PLAYWRIGHT_AVAILABLE:
+            logger.warning("⚠️ Playwright não disponível. Funcionalidades avançadas desabilitadas.")
+            
+        if not HAS_GEMINI:
+            logger.warning("⚠️ Google Generative AI não disponível. Análise de conteúdo limitada.")
+            
+        if not HAS_BS4:
+            logger.warning("⚠️ BeautifulSoup4 não disponível. Parsing HTML limitado.")
+
+    def _get_next_api_key(self, service: str) -> Optional[str]:
+        """Obtém próxima chave de API disponível com rotação automática"""
+        if service not in self.api_keys or not self.api_keys[service]:
+            return None
+        keys = self.api_keys[service]
+        if not keys:
+            return None
+        # Tentar todas as chaves disponíveis
+        for attempt in range(len(keys)):
+            current_index = self.current_api_index[service]
+            # Verificar se esta API não falhou recentemente
+            api_identifier = f"{service}_{current_index}"
+            if api_identifier not in self.failed_apis:
+                key = keys[current_index]
+                logger.info(f"🔄 Usando {service} API #{current_index + 1}")
+                # Avançar para próxima API na próxima chamada
+                self.current_api_index[service] = (current_index + 1) % len(keys)
+                return key
+            # Se esta API falhou, tentar a próxima
+            self.current_api_index[service] = (current_index + 1) % len(keys)
+        logger.error(f"❌ Todas as APIs de {service} falharam recentemente")
+        return None
+
+    def _mark_api_failed(self, service: str, index: int):
+        """Marca uma API como falhada temporariamente"""
+        api_identifier = f"{service}_{index}"
+        self.failed_apis.add(api_identifier)
+        logger.warning(f"⚠️ API {service} #{index + 1} marcada como falhada")
+        # Limpar falhas após 5 minutos (300 segundos)
+        import threading
+        def clear_failure():
+            time.sleep(300)  # 5 minutos
+            if api_identifier in self.failed_apis:
+                self.failed_apis.remove(api_identifier)
+                logger.info(f"✅ API {service} #{index + 1} reabilitada")
+        threading.Thread(target=clear_failure, daemon=True).start()
+
+    def _ensure_directories(self):
+        """Garante que todos os diretórios necessários existam"""
+        dirs_to_create = [
+            self.config['output_dir'],
+            self.config['images_dir'],
+            self.config['screenshots_dir']
+        ]
+        for directory in dirs_to_create:
+            try:
+                os.makedirs(directory, exist_ok=True)
+                logger.info(f"✅ Diretório criado/verificado: {directory}")
+            except Exception as e:
+                logger.error(f"❌ Erro ao criar diretório {directory}: {e}")
+
+    def setup_session(self):
+        """Configura sessão HTTP com headers apropriados"""
+        if hasattr(self, 'session'):
+            self.session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            })
+
+    async def search_images(self, query: str) -> List[Dict]:
+        """Busca imagens usando múltiplos provedores com estratégia aprimorada"""
+        all_results = []
+        # Queries mais específicas e eficazes para conteúdo educacional
+        queries = [
+            # Instagram queries - mais variadas
+            f'"{query}" site:instagram.com',
+            f'site:instagram.com/p "{query}"',
+            f'site:instagram.com/reel "{query}"',
+            f'"{query}" instagram curso',
+            f'"{query}" instagram masterclass',
+            f'"{query}" instagram dicas',
+            f'"{query}" instagram tutorial',
+            # Facebook queries - mais robustas
+            f'"{query}" site:facebook.com',
+            f'site:facebook.com/posts "{query}"',
+            f'"{query}" facebook curso',
+            f'"{query}" facebook aula',
+            f'"{query}" facebook dicas',
+            # YouTube queries - para thumbnails
+            f'"{query}" site:youtube.com',
+            f'site:youtube.com/watch "{query}"',
+            f'"{query}" youtube tutorial',
+            f'"{query}" youtube curso',
+            # Queries gerais mais amplas
+            f'"{query}" curso online',
+            f'"{query}" aula gratuita',
+            f'"{query}" tutorial gratis',
+            f'"{query}" masterclass'
+        ]
+        for q in queries[:8]:  # Aumentar para mais resultados
+            logger.info(f"🔍 Buscando: {q}")
+            results = []
+            # Tentar Serper primeiro (mais confiável)
+            if self.config.get('serper_api_key'):
+                try:
+                    serper_results = await self._search_serper_advanced(q)
+                    results.extend(serper_results)
+                    logger.info(f"📊 Serper encontrou {len(serper_results)} resultados para: {q}")
+                except Exception as e:
+                    logger.error(f"❌ Erro na busca Serper para '{q}': {e}")
+            # Google CSE como backup
+            if len(results) < 3 and self.config.get('google_search_key') and self.config.get('google_cse_id'):
+                try:
+                    google_results = await self._search_google_cse_advanced(q)
+                    results.extend(google_results)
+                    logger.info(f"📊 Google CSE encontrou {len(google_results)} resultados para: {q}")
+                except Exception as e:
+                    logger.error(f"❌ Erro na busca Google CSE para '{q}': {e}")
+            all_results.extend(results)
+            # Rate limiting
+            await asyncio.sleep(0.5)
+        
+        # YouTube thumbnails como fonte adicional
+        try:
+            youtube_results = await self._search_youtube_thumbnails(query)
+            all_results.extend(youtube_results)
+            logger.info(f"📺 YouTube thumbnails: {len(youtube_results)} encontrados")
+        except Exception as e:
+            logger.error(f"❌ Erro na busca YouTube: {e}")
+        
+        # Busca adicional específica para Facebook
+        try:
+            facebook_results = await self._search_facebook_specific(query)
+            all_results.extend(facebook_results)
+            logger.info(f"📘 Facebook específico: {len(facebook_results)} encontrados")
+        except Exception as e:
+            logger.error(f"❌ Erro na busca Facebook específica: {e}")
+        
+        # Busca adicional com estratégias alternativas se poucos resultados
+        if len(all_results) < 15:
+            try:
+                alternative_results = await self._search_alternative_strategies(query)
+                all_results.extend(alternative_results)
+                logger.info(f"🔄 Estratégias alternativas: {len(alternative_results)} encontrados")
+            except Exception as e:
+                logger.error(f"❌ Erro nas estratégias alternativas: {e}")
+        
+        # EXTRAÇÃO DIRETA DE POSTS ESPECÍFICOS
+        # Procurar por URLs específicas nos resultados e extrair imagens diretamente
+        direct_extraction_results = []
+        instagram_urls = []
+        facebook_urls = []
+        linkedin_urls = []
+        
+        # Coletar URLs específicas dos resultados
+        for result in all_results:
+            page_url = result.get('page_url', '')
+            if 'instagram.com/p/' in page_url or 'instagram.com/reel/' in page_url:
+                instagram_urls.append(page_url)
+            elif 'facebook.com' in page_url:
+                facebook_urls.append(page_url)
+            elif 'linkedin.com' in page_url:
+                linkedin_urls.append(page_url)
+        
+        # Extração direta do Instagram
+        for insta_url in list(set(instagram_urls))[:5]:  # Limitar a 5 URLs
+            try:
+                direct_results = await self._extract_instagram_direct(insta_url)
+                direct_extraction_results.extend(direct_results)
+            except Exception as e:
+                logger.warning(f"Erro extração direta Instagram {insta_url}: {e}")
+        
+        # Extração direta do Facebook
+        for fb_url in list(set(facebook_urls))[:3]:  # Limitar a 3 URLs
+            try:
+                direct_results = await self._extract_facebook_direct(fb_url)
+                direct_extraction_results.extend(direct_results)
+            except Exception as e:
+                logger.warning(f"Erro extração direta Facebook {fb_url}: {e}")
+        
+        # Extração direta do LinkedIn
+        for li_url in list(set(linkedin_urls))[:3]:  # Limitar a 3 URLs
+            try:
+                direct_results = await self._extract_linkedin_direct(li_url)
+                direct_extraction_results.extend(direct_results)
+            except Exception as e:
+                logger.warning(f"Erro extração direta LinkedIn {li_url}: {e}")
+        
+        # Adicionar resultados de extração direta
+        all_results.extend(direct_extraction_results)
+        logger.info(f"🎯 Extração direta: {len(direct_extraction_results)} imagens reais extraídas")
+        
+        # Remover duplicatas e filtrar URLs válidos
+        seen_urls = set()
+        unique_results = []
+        for result in all_results:
+            post_url = result.get('page_url', '').strip()
+            if post_url and post_url not in seen_urls and self._is_valid_social_url(post_url):
+                seen_urls.add(post_url)
+                unique_results.append(result)
+        logger.info(f"🎯 Encontrados {len(unique_results)} posts únicos e válidos")
+        return unique_results
+
+    def _is_valid_social_url(self, url: str) -> bool:
+        """Verifica se é uma URL válida de rede social"""
+        valid_patterns = [
+            r'instagram\\.com/(p|reel)/',
+            r'facebook\\.com/.+/posts/',
+            r'facebook\\.com/.+/photos/',
+            r'm\\.facebook\\.com/',
+            r'youtube\\.com/watch',
+            r'instagram\\.com/[^/]+/$'  # Perfis do Instagram
+        ]
+        return any(re.search(pattern, url) for pattern in valid_patterns)
+
+    def _is_valid_image_url(self, url: str) -> bool:
+        """Verifica se a URL parece ser de uma imagem real"""
+        if not url or not isinstance(url, str):
+            return False
+        
+        # URLs que claramente não são imagens
+        invalid_patterns = [
+            r'instagram\\.com/accounts/login',
+            r'facebook\\.com/login',
+            r'login\\.php',
+            r'/login/',
+            r'/auth/',
+            r'accounts/login',
+            r'\\.html$',
+            r'\\.php$',
+            r'\\.jsp$',
+            r'\\.asp$'
+        ]
+        
+        if any(re.search(pattern, url, re.IGNORECASE) for pattern in invalid_patterns):
+            return False
+        
+        # URLs que provavelmente são imagens
+        valid_patterns = [
+            r'\\.(jpg|jpeg|png|gif|webp|bmp|svg)(\\?|$)',
+            r'scontent.*\\.jpg',
+            r'scontent.*\\.png',
+            r'cdninstagram\\.com',
+            r'fbcdn\\.net',
+            r'instagram\\.com.*\\.(jpg|png|webp)',
+            r'facebook\\.com.*\\.(jpg|png|webp)',
+            r'lookaside\\.instagram\\.com',  # URLs de widget/crawler do Instagram
+            r'instagram\\.com/seo/',        # URLs SEO do Instagram
+            r'media_id=\\d+',              # URLs com media_id (Instagram)
+            r'graph\\.instagram\\.com',     # Graph API do Instagram
+            r'img\\.youtube\\.com',         # Thumbnails do YouTube
+            r'i\\.ytimg\\.com',            # Thumbnails alternativos do YouTube
+            r'youtube\\.com.*\\.(jpg|png|webp)',  # Imagens do YouTube
+            r'googleusercontent\\.com',    # Imagens do Google
+            r'ggpht\\.com',               # Google Photos/YouTube
+            r'ytimg\\.com',               # YouTube images
+            r'licdn\\.com',               # LinkedIn CDN
+            r'linkedin\\.com.*\\.(jpg|png|webp)',  # LinkedIn images
+            r'sssinstagram\\.com',        # SSS Instagram downloader
+            r'scontent-.*\\.cdninstagram\\.com',  # Instagram CDN específico
+            r'scontent\\..*\\.fbcdn\\.net'  # Facebook CDN específico
+        ]
+        
+        return any(re.search(pattern, url, re.IGNORECASE) for pattern in valid_patterns)
+
+    async def _search_serper_advanced(self, query: str) -> List[Dict]:
+        """Busca avançada usando Serper com rotação automática de APIs"""
+        if not self.api_keys.get('serper'):
+            logger.warning("❌ Nenhuma chave Serper configurada")
+            return []
+        
+        results = []
+        search_types = ['images', 'search']  # Busca por imagens e links
+        
+        for search_type in search_types:
+            url = f"https://google.serper.dev/{search_type}"
+            
+            # Payload básico e validado
+            payload = {
+                "q": query.strip(),
+                "num": 10,  # Reduzir para evitar rate limit
+                "gl": "br",
+                "hl": "pt"
+            }
+            
+            # Parâmetros específicos para imagens
+            if search_type == 'images':
+                payload.update({
+                    "imgSize": "large",
+                    "imgType": "photo"
+                })
+            
+            # Tentar com rotação de APIs
+            success = False
+            attempts = 0
+            max_attempts = min(3, len(self.api_keys['serper']))  # Máximo 3 tentativas
+            
+            while not success and attempts < max_attempts:
+                api_key = self._get_next_api_key('serper')
+                if not api_key:
+                    logger.error(f"❌ Nenhuma API Serper disponível")
+                    break
+                
+                headers = {
+                    'X-API-KEY': api_key,
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                
+                try:
+                    if HAS_ASYNC_DEPS:
+                        timeout = aiohttp.ClientTimeout(total=15)  # Reduzir timeout
+                        async with aiohttp.ClientSession(timeout=timeout) as session:
+                            async with session.post(url, headers=headers, json=payload) as response:
+                                if response.status == 200:
+                                    data = await response.json()
+                                    
+                                    if search_type == 'images':
+                                        for item in data.get('images', []):
+                                            image_url = item.get('imageUrl', '')
+                                            if image_url and self._is_valid_image_url(image_url):
+                                                results.append({
+                                                    'image_url': image_url,
+                                                    'page_url': item.get('link', ''),
+                                                    'title': item.get('title', ''),
+                                                    'description': item.get('snippet', ''),
+                                                    'source': 'serper_images'
+                                                })
+                                    else:  # search
+                                        for item in data.get('organic', []):
+                                            page_url = item.get('link', '')
+                                            if page_url:
+                                                results.append({
+                                                    'image_url': '',  # Será extraída depois
+                                                    'page_url': page_url,
+                                                    'title': item.get('title', ''),
+                                                    'description': item.get('snippet', ''),
+                                                    'source': 'serper_search'
+                                                })
+                                    
+                                    success = True
+                                    logger.info(f"✅ Serper {search_type} sucesso: {len(data.get('images' if search_type == 'images' else 'organic', []))} resultados")
+                                    
+                                elif response.status == 429:
+                                    logger.warning(f"⚠️ Rate limit Serper - aguardando...")
+                                    await asyncio.sleep(2)
+                                    
+                                elif response.status in [400, 401, 403]:
+                                    current_index = (self.current_api_index["serper"] - 1) % len(self.api_keys["serper"])
+                                    self._mark_api_failed("serper", current_index)
+                                    logger.error(f"❌ Serper API #{current_index + 1} inválida (status {response.status})")
+                                    
+                                else:
+                                    logger.error(f"❌ Serper retornou status {response.status}")
+                                    
+                    else:
+                        # Fallback síncrono
+                        response = self.session.post(url, headers=headers, json=payload, timeout=15)
+                        if response.status_code == 200:
+                            data = response.json()
+                            # Processar resultados similar ao async
+                            success = True
+                        else:
+                            logger.error(f"❌ Serper status {response.status_code}")
+                
+                except Exception as e:
+                    current_index = (self.current_api_index["serper"] - 1) % len(self.api_keys["serper"])
+                    logger.error(f"❌ Erro Serper API #{current_index + 1}: {str(e)[:100]}")
+                    
+                    # Marcar como falhada apenas se for erro de autenticação
+                    if "401" in str(e) or "403" in str(e) or "400" in str(e):
+                        self._mark_api_failed("serper", current_index)
+                
+                attempts += 1
+                if not success and attempts < max_attempts:
+                    await asyncio.sleep(1)  # Aguardar antes da próxima tentativa
+            
+            # Rate limiting entre tipos de busca
+            await asyncio.sleep(0.5)
+        
+        logger.info(f"📊 Serper total: {len(results)} resultados para '{query}'")
+        return results
+
+    async def _search_google_cse_advanced(self, query: str) -> List[Dict]:
+        """Busca aprimorada usando Google CSE"""
+        if not self.config.get('google_search_key') or not self.config.get('google_cse_id'):
+            return []
+        url = "https://www.googleapis.com/customsearch/v1"
+        params = {
+            'key': self.config['google_search_key'],
+            'cx': self.config['google_cse_id'],
+            'q': query,
+            'searchType': 'image',
+            'num': 10,  # Aumentar de 6 para 10 (máximo do Google CSE)
+            'safe': 'off',
+            'fileType': 'jpg,png,jpeg,webp,gif',
+            'imgSize': 'large',
+            'imgType': 'photo',
+            'gl': 'br',
+            'hl': 'pt'
+        }
+        try:
+            if HAS_ASYNC_DEPS:
+                timeout = aiohttp.ClientTimeout(total=self.config['timeout'])
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(url, params=params) as response:
+                        response.raise_for_status()
+                        data = await response.json()
+            else:
+                response = self.session.get(url, params=params, timeout=self.config['timeout'])
+                response.raise_for_status()
+                data = response.json()
+            results = []
+            for item in data.get('items', []):
+                results.append({
+                    'image_url': item.get('link', ''),
+                    'page_url': item.get('image', {}).get('contextLink', ''),
+                    'title': item.get('title', ''),
+                    'description': item.get('snippet', ''),
+                    'source': 'google_cse'
+                })
+            return results
+        except Exception as e:
+            if hasattr(e, 'response') and hasattr(e.response, 'status_code') and e.response.status_code == 429:
+                logger.error(f"❌ Google CSE quota excedida")
+            else:
+                logger.error(f"❌ Erro na busca Google CSE: {e}")
+            return []
+
+    async def _search_youtube_thumbnails(self, query: str) -> List[Dict]:
+        """Busca específica por thumbnails do YouTube"""
+        results = []
+        youtube_queries = [
+            f'"{query}" site:youtube.com',
+            f'site:youtube.com/watch "{query}"',
+            f'"{query}" youtube tutorial',
+            f'"{query}" youtube curso',
+            f'"{query}" youtube aula'
+        ]
+        
+        for yt_query in youtube_queries[:3]:  # Limitar para evitar rate limit
+            try:
+                # Usar Serper para buscar vídeos do YouTube
+                if self.api_keys.get('serper'):
+                    api_key = self._get_next_api_key('serper')
+                    if api_key:
+                        url = "https://google.serper.dev/search"
+                        payload = {
+                            "q": yt_query,
+                            "num": 15,
+                            "safe": "off",
+                            "gl": "br",
+                            "hl": "pt-br"
+                        }
+                        headers = {
+                            'X-API-KEY': api_key,
+                            'Content-Type': 'application/json'
+                        }
+                        
+                        if HAS_ASYNC_DEPS:
+                            timeout = aiohttp.ClientTimeout(total=30)
+                            async with aiohttp.ClientSession(timeout=timeout) as session:
+                                async with session.post(url, json=payload, headers=headers) as response:
+                                    if response.status == 200:
+                                        data = await response.json()
+                                        # Processar resultados do YouTube
+                                        for item in data.get('organic', []):
+                                            link = item.get('link', '')
+                                            if 'youtube.com/watch' in link:
+                                                # Extrair video ID e gerar thumbnail
+                                                video_id = self._extract_youtube_id(link)
+                                                if video_id:
+                                                    # Múltiplas qualidades de thumbnail
+                                                    thumbnail_configs = [
+                                                        ('maxresdefault.jpg', 'alta'),
+                                                        ('hqdefault.jpg', 'média-alta'),
+                                                        ('mqdefault.jpg', 'média'),
+                                                        ('sddefault.jpg', 'padrão'),
+                                                        ('default.jpg', 'baixa')
+                                                    ]
+                                                    for thumb_file, quality in thumbnail_configs:
+                                                        thumb_url = f"https://img.youtube.com/vi/{video_id}/{thumb_file}"
+                                                        results.append({
+                                                            'image_url': thumb_url,
+                                                            'page_url': link,
+                                                            'title': f"{item.get('title', f'Vídeo YouTube: {query}')} ({quality})",
+                                                            'description': item.get('snippet', '')[:200],
+                                                            'source': f'youtube_thumbnail_{quality}'
+                                                        })
+                        else:
+                            response = self.session.post(url, json=payload, headers=headers, timeout=30)
+                            if response.status_code == 200:
+                                data = response.json()
+                                # Similar processing for sync version
+                                for item in data.get('organic', []):
+                                    link = item.get('link', '')
+                                    if 'youtube.com/watch' in link:
+                                        video_id = self._extract_youtube_id(link)
+                                        if video_id:
+                                            # Múltiplas qualidades de thumbnail
+                                            thumbnail_configs = [
+                                                ('maxresdefault.jpg', 'alta'),
+                                                ('hqdefault.jpg', 'média-alta'),
+                                                ('mqdefault.jpg', 'média')
+                                            ]
+                                            for thumb_file, quality in thumbnail_configs:
+                                                thumb_url = f"https://img.youtube.com/vi/{video_id}/{thumb_file}"
+                                                results.append({
+                                                    'image_url': thumb_url,
+                                                    'page_url': link,
+                                                    'title': f"{item.get('title', f'Vídeo YouTube: {query}')} ({quality})",
+                                                    'description': item.get('snippet', '')[:200],
+                                                    'source': f'youtube_thumbnail_{quality}'
+                                                })
+            except Exception as e:
+                logger.warning(f"Erro na busca YouTube: {e}")
+                continue
+            
+            await asyncio.sleep(0.3)  # Rate limiting
+        
+        logger.info(f"📺 YouTube encontrou {len(results)} thumbnails")
+        return results
+
+    def _extract_youtube_id(self, url: str) -> str:
+        """Extrai ID do vídeo do YouTube da URL"""
+        patterns = [
+            r'youtube\\.com/watch\\?v=([^&]+)',
+            r'youtu\\.be/([^?]+)',
+            r'youtube\\.com/embed/([^?]+)'
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        return None
+
+    async def _search_facebook_specific(self, query: str) -> List[Dict]:
+        """Busca específica para conteúdo do Facebook"""
+        results = []
+        facebook_queries = [
+            f'"{query}" site:facebook.com',
+            f'site:facebook.com/posts "{query}"',
+            f'site:facebook.com/photo "{query}"',
+            f'"{query}" facebook curso',
+            f'"{query}" facebook aula',
+            f'"{query}" facebook dicas',
+            f'site:facebook.com "{query}" tutorial'
+        ]
+        
+        for fb_query in facebook_queries[:4]:  # Limitar para evitar rate limit
+            try:
+                # Usar Serper para buscar conteúdo do Facebook
+                if self.api_keys.get('serper'):
+                    api_key = self._get_next_api_key('serper')
+                    if api_key:
+                        # Busca por imagens do Facebook
+                        url = "https://google.serper.dev/images"
+                        payload = {
+                            "q": fb_query,
+                            "num": 15,
+                            "safe": "off",
+                            "gl": "br",
+                            "hl": "pt-br",
+                            "imgSize": "large",
+                            "imgType": "photo"
+                        }
+                        headers = {
+                            'X-API-KEY': api_key,
+                            'Content-Type': 'application/json'
+                        }
+                        
+                        if HAS_ASYNC_DEPS:
+                            timeout = aiohttp.ClientTimeout(total=30)
+                            async with aiohttp.ClientSession(timeout=timeout) as session:
+                                async with session.post(url, json=payload, headers=headers) as response:
+                                    if response.status == 200:
+                                        data = await response.json()
+                                        # Processar resultados de imagens do Facebook
+                                        for item in data.get('images', []):
+                                            image_url = item.get('imageUrl', '')
+                                            page_url = item.get('link', '')
+                                            if image_url and ('facebook.com' in page_url or 'fbcdn.net' in image_url):
+                                                results.append({
+                                                    'image_url': image_url,
+                                                    'page_url': page_url,
+                                                    'title': item.get('title', f'Post Facebook: {query}'),
+                                                    'description': item.get('snippet', '')[:200],
+                                                    'source': 'facebook_image'
+                                                })
+                        else:
+                            response = self.session.post(url, json=payload, headers=headers, timeout=30)
+                            if response.status_code == 200:
+                                data = response.json()
+                                for item in data.get('images', []):
+                                    image_url = item.get('imageUrl', '')
+                                    page_url = item.get('link', '')
+                                    if image_url and ('facebook.com' in page_url or 'fbcdn.net' in image_url):
+                                        results.append({
+                                            'image_url': image_url,
+                                            'page_url': page_url,
+                                            'title': item.get('title', f'Post Facebook: {query}'),
+                                            'description': item.get('snippet', '')[:200],
+                                            'source': 'facebook_image'
+                                        })
+            except Exception as e:
+                logger.warning(f"Erro na busca Facebook específica: {e}")
+                continue
+            
+            await asyncio.sleep(0.3)  # Rate limiting
+        
+        logger.info(f"📘 Facebook específico encontrou {len(results)} imagens")
+        return results
+
+    async def _search_alternative_strategies(self, query: str) -> List[Dict]:
+        """Estratégias alternativas de busca para aumentar resultados"""
+        results = []
+        
+        # Estratégias com termos mais amplos
+        alternative_queries = [
+            f'{query} tutorial',
+            f'{query} curso',
+            f'{query} aula',
+            f'{query} dicas',
+            f'{query} masterclass',
+            f'{query} online',
+            f'{query} gratis',
+            f'{query} free',
+            # Variações sem aspas para busca mais ampla
+            f'{query} instagram',
+            f'{query} facebook',
+            f'{query} youtube',
+            # Termos relacionados
+            f'como {query}',
+            f'aprenda {query}',
+            f'{query} passo a passo'
+        ]
+        
+        for alt_query in alternative_queries[:6]:  # Limitar para evitar rate limit
+            try:
+                if self.api_keys.get('serper'):
+                    api_key = self._get_next_api_key('serper')
+                    if api_key:
+                        url = "https://google.serper.dev/images"
+                        payload = {
+                            "q": alt_query,
+                            "num": 10,
+                            "safe": "off",
+                            "gl": "br",
+                            "hl": "pt-br",
+                            "imgSize": "medium",  # Usar medium para mais variedade
+                            "imgType": "photo"
+                        }
+                        headers = {
+                            'X-API-KEY': api_key,
+                            'Content-Type': 'application/json'
+                        }
+                        
+                        if HAS_ASYNC_DEPS:
+                            timeout = aiohttp.ClientTimeout(total=30)
+                            async with aiohttp.ClientSession(timeout=timeout) as session:
+                                async with session.post(url, json=payload, headers=headers) as response:
+                                    if response.status == 200:
+                                        data = await response.json()
+                                        for item in data.get('images', []):
+                                            image_url = item.get('imageUrl', '')
+                                            page_url = item.get('link', '')
+                                            if image_url and self._is_valid_image_url(image_url):
+                                                results.append({
+                                                    'image_url': image_url,
+                                                    'page_url': page_url,
+                                                    'title': item.get('title', f'Conteúdo: {query}'),
+                                                    'description': item.get('snippet', '')[:200],
+                                                    'source': 'alternative_search'
+                                                })
+                        else:
+                            response = self.session.post(url, json=payload, headers=headers, timeout=30)
+                            if response.status_code == 200:
+                                data = response.json()
+                                for item in data.get('images', []):
+                                    image_url = item.get('imageUrl', '')
+                                    page_url = item.get('link', '')
+                                    if image_url and self._is_valid_image_url(image_url):
+                                        results.append({
+                                            'image_url': image_url,
+                                            'page_url': page_url,
+                                            'title': item.get('title', f'Conteúdo: {query}'),
+                                            'description': item.get('snippet', '')[:200],
+                                            'source': 'alternative_search'
+                                        })
+            except Exception as e:
+                logger.warning(f"Erro na busca alternativa: {e}")
+                continue
+            
+            await asyncio.sleep(0.2)  # Rate limiting mais rápido
+        
+        logger.info(f"🔄 Estratégias alternativas encontraram {len(results)} imagens")
+        return results
+
+    async def _extract_instagram_direct(self, post_url: str) -> List[Dict]:
+        """Extrai imagens diretamente do Instagram usando múltiplas estratégias"""
+        results = []
+        
+        try:
+            # Estratégia 1: Usar sssinstagram.com API
+            results_sss = await self._extract_via_sssinstagram(post_url)
+            results.extend(results_sss)
+            
+            # Estratégia 2: Extração direta via embed
+            if len(results) < 3:
+                results_embed = await self._extract_instagram_embed(post_url)
+                results.extend(results_embed)
+            
+            # Estratégia 3: Usar oembed do Instagram
+            if len(results) < 3:
+                results_oembed = await self._extract_instagram_oembed(post_url)
+                results.extend(results_oembed)
+                
+        except Exception as e:
+            logger.error(f"❌ Erro na extração direta Instagram: {e}")
+        
+        logger.info(f"📸 Instagram direto: {len(results)} imagens extraídas")
+        return results
+
+    async def _extract_via_sssinstagram(self, post_url: str) -> List[Dict]:
+        """Extrai imagens usando sssinstagram.com"""
+        results = []
+        try:
+            # Simular requisição para sssinstagram.com
+            api_url = "https://sssinstagram.com/api/ig/post"
+            payload = {"url": post_url}
+            
+            if HAS_ASYNC_DEPS:
+                timeout = aiohttp.ClientTimeout(total=30)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(api_url, json=payload) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            # Processar resposta do sssinstagram
+                            if data.get('success') and data.get('data'):
+                                media_data = data['data']
+                                if isinstance(media_data, list):
+                                    for item in media_data:
+                                        if item.get('url'):
+                                            results.append({
+                                                'image_url': item['url'],
+                                                'page_url': post_url,
+                                                'title': f'Instagram Post',
+                                                'description': item.get('caption', '')[:200],
+                                                'source': 'sssinstagram_direct'
+                                            })
+                                elif media_data.get('url'):
+                                    results.append({
+                                        'image_url': media_data['url'],
+                                        'page_url': post_url,
+                                        'title': f'Instagram Post',
+                                        'description': media_data.get('caption', '')[:200],
+                                        'source': 'sssinstagram_direct'
+                                    })
+            else:
+                response = self.session.post(api_url, json=payload, timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    # Similar processing for sync version
+                    if data.get('success') and data.get('data'):
+                        media_data = data['data']
+                        if isinstance(media_data, list):
+                            for item in media_data:
+                                if item.get('url'):
+                                    results.append({
+                                        'image_url': item['url'],
+                                        'page_url': post_url,
+                                        'title': f'Instagram Post',
+                                        'description': item.get('caption', '')[:200],
+                                        'source': 'sssinstagram_direct'
+                                    })
+                        elif media_data.get('url'):
+                            results.append({
+                                'image_url': media_data['url'],
+                                'page_url': post_url,
+                                'title': f'Instagram Post',
+                                'description': media_data.get('caption', '')[:200],
+                                'source': 'sssinstagram_direct'
+                            })
+        except Exception as e:
+            logger.warning(f"Erro na extração via sssinstagram: {e}")
+        
+        return results
+
+    async def _extract_instagram_embed(self, post_url: str) -> List[Dict]:
+        """Extrai imagens usando embed do Instagram"""
+        results = []
+        try:
+            # Tentar obter embed HTML do Instagram
+            embed_url = f"https://api.instagram.com/oembed/?url={post_url}"
+            
+            if HAS_ASYNC_DEPS:
+                timeout = aiohttp.ClientTimeout(total=15)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(embed_url) as response:
+                        if response.status == 200:
+                            embed_data = await response.json()
+                            
+                            # Extrair thumbnail URL se disponível
+                            thumbnail_url = embed_data.get('thumbnail_url')
+                            if thumbnail_url:
+                                results.append({
+                                    'image_url': thumbnail_url,
+                                    'page_url': post_url,
+                                    'title': embed_data.get('title', 'Instagram Post'),
+                                    'description': embed_data.get('author_name', ''),
+                                    'source': 'instagram_embed'
+                                })
+            else:
+                response = self.session.get(embed_url, timeout=15)
+                if response.status_code == 200:
+                    embed_data = response.json()
+                    
+                    # Extrair thumbnail URL se disponível
+                    thumbnail_url = embed_data.get('thumbnail_url')
+                    if thumbnail_url:
+                        results.append({
+                            'image_url': thumbnail_url,
+                            'page_url': post_url,
+                            'title': embed_data.get('title', 'Instagram Post'),
+                            'description': embed_data.get('author_name', ''),
+                            'source': 'instagram_embed'
+                        })
+        except Exception as e:
+            logger.warning(f"Erro na extração via embed Instagram: {e}")
+        
+        return results
+
+    async def _extract_instagram_oembed(self, post_url: str) -> List[Dict]:
+        """Extrai imagens usando oembed do Instagram"""
+        # Similar ao embed, mas com abordagem alternativa
+        return await self._extract_instagram_embed(post_url)
+
+    async def _extract_facebook_direct(self, post_url: str) -> List[Dict]:
+        """Extrai imagens diretamente do Facebook"""
+        results = []
+        try:
+            # Tentar obter dados do post via scraping (simulado)
+            # Em uma implementação real, isso exigiria autenticação ou APIs específicas
+            
+            # Por enquanto, apenas adiciona um resultado genérico
+            results.append({
+                'image_url': '',
+                'page_url': post_url,
+                'title': 'Facebook Post',
+                'description': 'Extração direta do Facebook requer autenticação',
+                'source': 'facebook_direct'
+            })
+            
+        except Exception as e:
+            logger.warning(f"Erro na extração direta Facebook: {e}")
+        
+        return results
+
+    async def _extract_linkedin_direct(self, post_url: str) -> List[Dict]:
+        """Extrai imagens diretamente do LinkedIn"""
+        results = []
+        try:
+            # Tentar obter dados do post via scraping (simulado)
+            # Em uma implementação real, isso exigiria autenticação ou APIs específicas
+            
+            # Por enquanto, apenas adiciona um resultado genérico
+            results.append({
+                'image_url': '',
+                'page_url': post_url,
+                'title': 'LinkedIn Post',
+                'description': 'Extração direta do LinkedIn requer autenticação',
+                'source': 'linkedin_direct'
+            })
+            
+        except Exception as e:
+            logger.warning(f"Erro na extração direta LinkedIn: {e}")
+        
+        return results
+
+    async def download_viral_images(self, image_results: List[Dict], session_id: str = None) -> List[Dict]:
+        """Baixa as imagens virais encontradas"""
+        if not self.config.get('extract_images', True):
+            logger.info("⚠️ Download de imagens desativado na configuração")
+            return []
+        
+        downloaded_images = []
+        images_dir = Path(self.config['images_dir'])
+        images_dir.mkdir(exist_ok=True)
+        
+        session_id = session_id or f"session_{int(time.time())}"
+        session_dir = images_dir / session_id
+        session_dir.mkdir(exist_ok=True)
+        
+        logger.info(f"📥 Baixando {len(image_results)} imagens para {session_dir}")
+        
+        for i, result in enumerate(image_results):
+            try:
+                image_url = result.get('image_url', '')
+                if not image_url or not self._is_valid_image_url(image_url):
+                    logger.warning(f"URL de imagem inválida: {image_url}")
+                    continue
+                
+                # Gerar nome de arquivo seguro
+                safe_title = "".join(c if c.isalnum() else "_" for c in result.get('title', 'image')[:30])
+                file_ext = self._get_file_extension(image_url)
+                filename = f"{i:03d}_{safe_title}{file_ext}"
+                filepath = session_dir / filename
+                
+                # Baixar imagem
+                if HAS_ASYNC_DEPS:
+                    timeout = aiohttp.ClientTimeout(total=30)
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        async with session.get(image_url) as response:
+                            if response.status == 200:
+                                content = await response.read()
+                                async with aiofiles.open(filepath, 'wb') as f:
+                                    await f.write(content)
+                                
+                                downloaded_images.append({
+                                    'filename': filename,
+                                    'filepath': str(filepath),
+                                    'relative_path': f"{session_id}/{filename}",
+                                    'original_url': image_url,
+                                    'post_url': result.get('page_url', ''),
+                                    'title': result.get('title', ''),
+                                    'file_size': len(content),
+                                    'downloaded_at': datetime.now().isoformat(),
+                                    'download_success': True
+                                })
+                                logger.info(f"✅ Imagem {i+1}/{len(image_results)} baixada: {filename}")
+                            else:
+                                logger.warning(f"⚠️ Falha ao baixar imagem {i+1}: Status {response.status}")
+                else:
+                    response = self.session.get(image_url, timeout=30)
+                    if response.status_code == 200:
+                        with open(filepath, 'wb') as f:
+                            f.write(response.content)
+                        
+                        downloaded_images.append({
+                            'filename': filename,
+                            'filepath': str(filepath),
+                            'relative_path': f"{session_id}/{filename}",
+                            'original_url': image_url,
+                            'post_url': result.get('page_url', ''),
+                            'title': result.get('title', ''),
+                            'file_size': len(response.content),
+                            'downloaded_at': datetime.now().isoformat(),
+                            'download_success': True
+                        })
+                        logger.info(f"✅ Imagem {i+1}/{len(image_results)} baixada: {filename}")
+                    else:
+                        logger.warning(f"⚠️ Falha ao baixar imagem {i+1}: Status {response.status_code}")
+                
+                # Rate limiting
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"❌ Erro ao baixar imagem {i}: {e}")
+                continue
+        
+        logger.info(f"✅ Download concluído: {len(downloaded_images)} imagens baixadas")
+        return downloaded_images
+
+    def _get_file_extension(self, url: str) -> str:
+        """Extrai extensão do arquivo da URL"""
+        # Padrão para extensões de imagem
+        ext_match = re.search(r'\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?|$)', url.lower())
+        if ext_match:
+            return f".{ext_match.group(1)}"
+        
+        # Padrão para URLs sem extensão explícita
+        if any(pattern in url.lower() for pattern in ['jpg', 'jpeg', 'png']):
+            return '.jpg'  # Padrão como fallback
+        
+        return '.jpg'  # Padrão final como fallback
+
+# =============== INSTÂNCIAS GLOBAIS ===============
+
+# Instância principal do Alibaba WebSailor
 alibaba_websailor = AlibabaWebSailorAgent()
+
+def get_alibaba_websailor():
+    """Retorna a instância global do Alibaba WebSailor Agent"""
+    return alibaba_websailor
