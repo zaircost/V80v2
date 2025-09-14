@@ -21,18 +21,24 @@ import re
 from urllib.parse import urlparse, quote_plus
 import mimetypes
 
-# Imports condicionais para evitar erros
-try:
-    from services.enhanced_api_rotation_manager import get_api_manager
-    HAS_API_MANAGER = True
-except ImportError:
-    HAS_API_MANAGER = False
+# Imports robustos com fallbacks
+def safe_import_api_manager():
+    try:
+        from services.enhanced_api_rotation_manager import get_api_manager
+        return get_api_manager(), True
+    except ImportError:
+        logger.warning("⚠️ Enhanced API Rotation Manager não disponível")
+        return None, False
 
-try:
-    from services.auto_save_manager import salvar_etapa, salvar_erro
-    HAS_AUTO_SAVE = True
-except ImportError:
-    HAS_AUTO_SAVE = False
+def safe_import_auto_save():
+    try:
+        from services.auto_save_manager import salvar_etapa, salvar_erro
+        return salvar_etapa, salvar_erro, True
+    except ImportError:
+        logger.warning("⚠️ Auto Save Manager não disponível")
+        def dummy_save(*args, **kwargs):
+            pass
+        return dummy_save, dummy_save, False
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +73,8 @@ class ViralIntegrationService:
 
     def __init__(self):
         """Inicializa o serviço viral"""
-        self.api_manager = get_api_manager() if HAS_API_MANAGER else None
+        self.api_manager, self.has_api_manager = safe_import_api_manager()
+        self.salvar_etapa, self.salvar_erro, self.has_auto_save = safe_import_auto_save()
         self.session = requests.Session()
         
         # Configuração de headers realistas
@@ -81,29 +88,31 @@ class ViralIntegrationService:
             'Upgrade-Insecure-Requests': '1'
         })
         
-        # Configurações de extração
+        # Configurações de extração ATUALIZADAS
         self.extraction_tools = {
             'instagram': [
-                'https://sssinstagram.com/api/download',
-                'https://instasave.website/api/download',
-                'https://downloadgram.org/api/download'
+                'https://snapinsta.app/api/download',
+                'https://igram.world/api/download',
+                'https://instaloader.github.io/api/download'
             ],
             'facebook': [
-                'https://hitube.io/api/facebook',
-                'https://fbdown.net/api/download'
+                'https://getfvid.com/api/facebook',
+                'https://fbdownloader.net/api/download'
             ],
             'youtube': [
-                'https://youtube-thumbnail-grabber.com/api/thumbnail',
                 'https://img.youtube.com/vi/{video_id}/maxresdefault.jpg'
             ],
             'tiktok': [
-                'https://tiktok.coderobo.org/api/download',
-                'https://tikdown.org/api/download'
+                'https://tikmate.online/api/download',
+                'https://snaptik.app/api/download'
             ],
             'linkedin': [
-                'https://linkedindownloader.io/api/download'
+                'https://linkedin-downloader.com/api/download'
             ]
         }
+        
+        # APIs disponíveis para rotação
+        self.available_apis = self._check_available_apis()
         
         # Diretórios de saída
         self.output_dir = Path("viral_images_data")
@@ -117,6 +126,43 @@ class ViralIntegrationService:
         self.max_images_per_platform = 20
         
         logger.info("🔥 Viral Integration Service CORRIGIDO inicializado")
+        logger.info(f"🔑 APIs disponíveis: {len(self.available_apis)}")
+
+    def _check_available_apis(self) -> Dict[str, List[str]]:
+        """Verifica APIs disponíveis para rotação"""
+        available = {}
+        
+        # Verifica chaves Serper
+        serper_keys = []
+        for i in range(1, 5):  # Até 4 chaves
+            key = os.getenv(f'SERPER_API_KEY_{i}') or (os.getenv('SERPER_API_KEY') if i == 1 else None)
+            if key:
+                serper_keys.append(key)
+        
+        if serper_keys:
+            available['serper'] = serper_keys
+            logger.info(f"✅ Serper: {len(serper_keys)} chaves disponíveis")
+        
+        # Verifica chaves Google
+        google_key = os.getenv('GOOGLE_SEARCH_KEY')
+        google_cse = os.getenv('GOOGLE_CSE_ID')
+        if google_key and google_cse:
+            available['google'] = [{'key': google_key, 'cse': google_cse}]
+            logger.info("✅ Google CSE disponível")
+        
+        # Verifica YouTube
+        youtube_key = os.getenv('YOUTUBE_API_KEY')
+        if youtube_key:
+            available['youtube'] = [youtube_key]
+            logger.info("✅ YouTube API disponível")
+        
+        # Verifica RapidAPI
+        rapidapi_key = os.getenv('RAPIDAPI_KEY')
+        if rapidapi_key:
+            available['rapidapi'] = [rapidapi_key]
+            logger.info("✅ RapidAPI disponível")
+        
+        return available
 
     async def find_viral_content(
         self,
@@ -164,7 +210,7 @@ class ViralIntegrationService:
         try:
             # FASE 1: Busca por URLs de posts virais
             logger.info("🔍 FASE 1: Buscando URLs de posts virais...")
-            post_urls = await self._search_viral_post_urls(query, platforms)
+            post_urls = await self._search_viral_post_urls_with_rotation(query, platforms)
             
             if not post_urls:
                 viral_results["errors"].append("Nenhuma URL de post encontrada")
@@ -231,6 +277,136 @@ class ViralIntegrationService:
             viral_results["errors"].append(error_msg)
             logger.error(f"❌ {error_msg}")
             return viral_results
+
+    async def _search_viral_post_urls_with_rotation(self, query: str, platforms: List[str]) -> List[Tuple[str, str]]:
+        """Busca URLs com rotação robusta de APIs"""
+        
+        post_urls = []
+        current_api_index = {'serper': 0, 'google': 0}
+        
+        # Estratégias de busca por plataforma com rotação
+        for platform in platforms:
+            try:
+                logger.info(f"🔍 Buscando URLs do {platform} com rotação de APIs...")
+                
+                platform_urls = []
+                
+                # Estratégia 1: Serper com rotação
+                if 'serper' in self.available_apis:
+                    for attempt in range(len(self.available_apis['serper'])):
+                        try:
+                            api_key = self.available_apis['serper'][current_api_index['serper']]
+                            
+                            if platform == 'instagram':
+                                urls = await self._search_with_serper(f"site:instagram.com {query} patchwork costura", api_key)
+                            elif platform == 'facebook':
+                                urls = await self._search_with_serper(f"site:facebook.com {query} patchwork", api_key)
+                            elif platform == 'youtube':
+                                urls = await self._search_with_serper(f"site:youtube.com {query} tutorial", api_key)
+                            else:
+                                urls = await self._search_with_serper(f"site:{platform}.com {query}", api_key)
+                            
+                            platform_urls.extend(urls)
+                            logger.info(f"✅ Serper {platform}: {len(urls)} URLs (chave {current_api_index['serper'] + 1})")
+                            break
+                            
+                        except Exception as e:
+                            logger.warning(f"⚠️ Serper chave {current_api_index['serper'] + 1} falhou: {e}")
+                            current_api_index['serper'] = (current_api_index['serper'] + 1) % len(self.available_apis['serper'])
+                            continue
+                
+                # Estratégia 2: APIs específicas por plataforma
+                if platform == 'youtube' and 'youtube' in self.available_apis and len(platform_urls) < 5:
+                    try:
+                        youtube_urls = await self._search_youtube_api_robust(query, self.available_apis['youtube'][0])
+                        platform_urls.extend(youtube_urls)
+                        logger.info(f"✅ YouTube API: {len(youtube_urls)} URLs")
+                    except Exception as e:
+                        logger.warning(f"⚠️ YouTube API falhou: {e}")
+                
+                # Estratégia 3: Google CSE como fallback
+                if 'google' in self.available_apis and len(platform_urls) < 3:
+                    try:
+                        google_config = self.available_apis['google'][0]
+                        google_urls = await self._search_with_google_cse(
+                            f"site:{platform}.com {query}",
+                            google_config['key'],
+                            google_config['cse']
+                        )
+                        platform_urls.extend(google_urls)
+                        logger.info(f"✅ Google CSE {platform}: {len(google_urls)} URLs")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Google CSE {platform} falhou: {e}")
+                
+                # Adiciona URLs encontradas
+                if platform_urls:
+                    post_urls.extend([(url, platform) for url in platform_urls])
+                    logger.info(f"✅ {platform}: {len(platform_urls)} URLs totais encontradas")
+                else:
+                    logger.warning(f"⚠️ {platform}: Nenhuma URL encontrada")
+                    
+            except Exception as e:
+                logger.error(f"❌ Erro na busca {platform}: {e}")
+                continue
+        
+        return post_urls
+
+    async def _search_youtube_api_robust(self, query: str, api_key: str) -> List[str]:
+        """Busca YouTube com tratamento robusto de erros"""
+        urls = []
+        
+        try:
+            # Múltiplas variações da query para YouTube
+            search_queries = [
+                f"{query} tutorial",
+                f"{query} passo a passo",
+                f"{query} dicas",
+                f"{query} como fazer"
+            ]
+            
+            for search_query in search_queries[:2]:  # Limita para não esgotar quota
+                try:
+                    params = {
+                        'part': 'snippet',
+                        'q': search_query,
+                        'key': api_key,
+                        'type': 'video',
+                        'order': 'viewCount',
+                        'maxResults': 8,
+                        'regionCode': 'BR',
+                        'relevanceLanguage': 'pt'
+                    }
+                    
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(
+                            'https://www.googleapis.com/youtube/v3/search',
+                            params=params,
+                            timeout=30
+                        ) as response:
+                            
+                            if response.status == 200:
+                                data = await response.json()
+                                
+                                for item in data.get('items', []):
+                                    video_id = item.get('id', {}).get('videoId', '')
+                                    if video_id:
+                                        video_url = f"https://www.youtube.com/watch?v={video_id}"
+                                        urls.append(video_url)
+                                        
+                            elif response.status == 403:
+                                logger.warning("⚠️ YouTube API quota excedida")
+                                break
+                            else:
+                                logger.error(f"❌ YouTube API erro {response.status}")
+                                
+                except Exception as e:
+                    logger.warning(f"⚠️ Erro na query YouTube '{search_query}': {e}")
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"❌ Erro YouTube API robusto: {e}")
+        
+        return list(set(urls))  # Remove duplicatas
 
     async def _search_viral_post_urls(self, query: str, platforms: List[str]) -> List[Tuple[str, str]]:
         """Busca URLs de posts virais usando rotação de APIs"""
@@ -1226,16 +1402,16 @@ class ViralIntegrationService:
             logger.info(f"💾 Resultados virais salvos: {file_path}")
             
             # Salva via auto_save_manager se disponível
-            if HAS_AUTO_SAVE and session_id:
-                salvar_etapa("viral_content_results", viral_results, categoria="viral_analysis", session_id=session_id)
+            if self.has_auto_save and session_id:
+                self.salvar_etapa("viral_content_results", viral_results, categoria="viral_analysis", session_id=session_id)
             
             # Gera relatório em texto
             await self._generate_viral_text_report(viral_results, query)
             
         except Exception as e:
             logger.error(f"❌ Erro ao salvar resultados: {e}")
-            if HAS_AUTO_SAVE:
-                salvar_erro("viral_save_error", e, contexto={"query": query})
+            if self.has_auto_save:
+                self.salvar_erro("viral_save_error", e, contexto={"query": query})
 
     async def _generate_viral_text_report(self, viral_results: Dict[str, Any], query: str):
         """Gera relatório em texto para incorporação no RES_BUSCA"""
@@ -1560,8 +1736,8 @@ class ViralIntegrationService:
         return {
             "service_name": "Viral Integration Service",
             "version": "3.0_CORRIGIDO",
-            "api_manager_available": HAS_API_MANAGER,
-            "auto_save_available": HAS_AUTO_SAVE,
+            "api_manager_available": self.has_api_manager,
+            "auto_save_available": self.has_auto_save,
             "output_directory": str(self.output_dir),
             "images_directory": str(self.images_dir),
             "supported_platforms": list(self.extraction_tools.keys()),

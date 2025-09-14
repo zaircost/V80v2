@@ -15,7 +15,17 @@ from pathlib import Path
 
 # Import do serviço viral corrigido
 from services.viral_integration_service import viral_integration_service
-from services.auto_save_manager import salvar_etapa, salvar_erro
+
+# Import robusto do auto save
+try:
+    from services.auto_save_manager import salvar_etapa, salvar_erro
+    HAS_AUTO_SAVE = True
+except ImportError:
+    HAS_AUTO_SAVE = False
+    def salvar_etapa(*args, **kwargs):
+        pass
+    def salvar_erro(*args, **kwargs):
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +97,11 @@ class ViralContentAnalyzer:
             }
             
             # Salva resultados
-            salvar_etapa("viral_analysis_complete", final_results, categoria="viral_analysis", session_id=session_id)
+            if HAS_AUTO_SAVE:
+                salvar_etapa("viral_analysis_complete", final_results, categoria="viral_analysis", session_id=session_id)
+            
+            # Salva também em arquivo local para garantir persistência
+            await self._save_viral_analysis_local(final_results, session_id)
             
             logger.info(f"✅ ANÁLISE VIRAL CONCLUÍDA")
             logger.info(f"📊 {final_results['statistics']['total_viral_content']} conteúdos virais")
@@ -98,7 +112,8 @@ class ViralContentAnalyzer:
         except Exception as e:
             error_msg = f"Erro na análise viral: {str(e)}"
             logger.error(f"❌ {error_msg}")
-            salvar_erro("viral_analysis_error", e, contexto={"session_id": session_id})
+            if HAS_AUTO_SAVE:
+                salvar_erro("viral_analysis_error", e, contexto={"session_id": session_id})
             
             return {
                 "session_id": session_id,
@@ -115,6 +130,75 @@ class ViralContentAnalyzer:
                 "timestamp": datetime.now().isoformat()
             }
 
+    async def _save_viral_analysis_local(self, results: Dict[str, Any], session_id: str):
+        """Salva análise viral localmente para garantir persistência"""
+        try:
+            # Cria diretório da sessão
+            session_dir = Path(f"analyses_data/{session_id}")
+            session_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Salva resultados completos
+            results_path = session_dir / "viral_analysis_results.json"
+            with open(results_path, 'w', encoding='utf-8') as f:
+                json.dump(results, f, ensure_ascii=False, indent=2, default=str)
+            
+            # Salva relatório em markdown
+            report_path = session_dir / "viral_analysis_report.md"
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(self._generate_markdown_report(results))
+            
+            logger.info(f"💾 Análise viral salva localmente: {session_dir}")
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao salvar localmente: {e}")
+
+    def _generate_markdown_report(self, results: Dict[str, Any]) -> str:
+        """Gera relatório em markdown da análise viral"""
+        
+        lines = []
+        
+        lines.append("# ANÁLISE DE CONTEÚDO VIRAL")
+        lines.append(f"**Sessão:** {results.get('session_id', 'N/A')}")
+        lines.append(f"**Query:** {results.get('query', 'N/A')}")
+        lines.append(f"**Data:** {results.get('timestamp', 'N/A')}")
+        lines.append("")
+        
+        # Estatísticas
+        stats = results.get('statistics', {})
+        lines.append("## ESTATÍSTICAS")
+        lines.append(f"- **Conteúdos virais:** {stats.get('total_viral_content', 0)}")
+        lines.append(f"- **Imagens baixadas:** {stats.get('images_downloaded', 0)}")
+        lines.append(f"- **Screenshots:** {stats.get('screenshots_taken', 0)}")
+        lines.append(f"- **Engagement médio:** {stats.get('avg_engagement', 0):.1f}")
+        lines.append(f"- **Plataformas analisadas:** {stats.get('platforms_analyzed', 0)}")
+        lines.append("")
+        
+        # Insights
+        insights = results.get('viral_insights', [])
+        if insights:
+            lines.append("## INSIGHTS VIRAIS")
+            for insight in insights:
+                lines.append(f"- {insight}")
+            lines.append("")
+        
+        # Conteúdo viral
+        viral_content = results.get('viral_content_identified', [])
+        if viral_content:
+            lines.append("## CONTEÚDO VIRAL IDENTIFICADO")
+            for i, content in enumerate(viral_content[:10], 1):
+                if isinstance(content, dict):
+                    lines.append(f"### {i}. {content.get('title', 'Sem título')}")
+                    lines.append(f"**Plataforma:** {content.get('platform', 'N/A').upper()}")
+                    lines.append(f"**Engagement:** {content.get('engagement_score', 0):.1f}")
+                    lines.append(f"**URL:** {content.get('post_url', 'N/A')}")
+                    
+                    if content.get('description'):
+                        desc = content['description'][:200].replace('\n', ' ')
+                        lines.append(f"**Descrição:** {desc}...")
+                    
+                    lines.append("")
+        
+        return '\n'.join(lines)
     def _extract_social_urls_from_search(self, search_results: Dict[str, Any]) -> List[str]:
         """Extrai URLs de redes sociais dos resultados de busca"""
         social_urls = []
